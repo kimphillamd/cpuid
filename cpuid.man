@@ -1,7 +1,7 @@
 .\"
-.\" $Id: cpuid.man,v 20201006 2020/10/06 06:38:56 todd $
+.\" $Id: cpuid.man,v 20221003 2022/10/03 07:37:43 todd $
 .\"
-.TH CPUID 1 "6 Oct 2020" "20201006"
+.TH CPUID 1 "3 Oct 2022" "20221003"
 .SH NAME 
 cpuid \- Dump CPUID information for each CPU
 .SH SYNOPSIS
@@ -470,7 +470,8 @@ Preliminary Specification Update
 .br
 335252: 5-Level Paging and 5-Level EPT White Paper
 .br
-335718: Intel Xeon Processor E3-1200 v6 Product Family Specification Update
+335718/730694: Intel Xeon Processor E3-1200 v6 Product Family
+Specification Update
 .br
 335864: Intel Celeron Processor J1800, J1900, N2807, and N2930 for
 Internet of Things Specification Update Addendum
@@ -502,11 +503,37 @@ Specification Update
 .br
 341079: 10th Generation Intel Core Processor Families Specification Update
 .br
+343754: Intel Trust Domain CPU Architectural Extensions
+.br
+344425: Architecture Specification: Intel Trust Domain Extensions (Intel TDX)
+Module
+.br
 615213: 10th Generation Intel Core Processor Specification Update
 .br
 631123: 11th Generation Intel Core Processor Family Specification Update
 .br
+634808: 11th Generation Intel Core Processor Specification Update
+Supporting 11th Generation Intel Core Processor Families for S Platform,
+formerly known as Rocket Lake
+.br
+637780: 3rd Gen Intel Xeon Scalable Processors, Codename Ice Lake
+Specification Update
+.br
+682436: 12th Generation Intel Core Processor Specification Update
+Supporting 12th Generation Intel Core Processor for S Processor Line Platforms,
+formerly known as Alder Lake
+.br
 Intel Microcode Update Guidance
+.br
+Branch History Injection and Intra-mode Branch Target Injection /
+CVE-2022-0001, CVE-2022-0002 / INTEL-SA-00598
+.br
+Intel Transactional Synchronization Extensions (Intel TSX) Memory and
+Performance Monitoring Update for Intel Processors (Article ID 000059422)
+.br
+Retpoline: A Branch Target Injection Mitigation
+.br
+Special Register Buffer Data Sampling
 .RE
 
 Information on the CPUID instruction and on specific CPUs is available from
@@ -601,10 +628,15 @@ Model 31h, Revision B0 Processors
 56176: Processor Programming Reference (PPR) for AMD Family 17h Model 71h,
 Revision B0 Processors
 .br
+56375: AMD64 Technology Platform Quality of Service Extensions
+.br
 AMD64 Technology Indirect Branch Control Extension (White Paper),
 Revision 4.10.18
 .br
 AMD64 Technology Speculative Store Bypass Disable (White Paper), Revision 5.21.18
+.br
+Technical Guidance For Mitigating Branch Type Confusion (White Paper),
+Revision 2022-07-12
 .RE
 
 Information on the CPUID instruction and on specific CPUs is available
@@ -614,6 +646,16 @@ from the following documents from Transmeta Corporation
 .RS
 .br
 Processor Recognition, 2002/05/07
+.RE
+
+Information on the CPUID instruction and on specific CPUs is available
+from the following documents from Cyrix:
+
+.RS
+.br
+Application Note 112: Cyrix CPU Detection Guide
+.br
+Cyrix 6x86 Processor, Instruction Set
 .RE
 
 The linux kernel can be a source of information on CPUID flags, using

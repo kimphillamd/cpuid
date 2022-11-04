@@ -1,7 +1,7 @@
 /*
 ** cpuid dumps CPUID information for each CPU.
 ** Copyright 2003,2004,2005,2006,2010,2011,2012,2013,2014,2015,2016,2017,2018,
-** 2020 by Todd Allen.
+** 2020,2021,2022 by Todd Allen.
 ** 
 ** This program is free software; you can redistribute it and/or
 ** modify it under the terms of the GNU General Public License
@@ -29,6 +29,12 @@
 // Microcode Update Guidance).  Its purpose is not to list CPUID values, but
 // it does so, and sometimes lists values that appear nowhere else.
 
+// SSG* is the Software Security Guidance Processors Affected table.  It
+// replaces the MRG* circa 2022.  Again, its purpose is not to list CPUID
+// values, but it does so, and sometimes lists values that appear nowhere else.
+// It appears to be available only in online HTML form:
+//    https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/processors-affected-consolidated-product-cpu-model.html
+
 // LX* indicates features that I have seen no documentation for, but which are
 // used by the Linux kernel (which is good evidence that they're correct).
 // The "hook" to find these generally is an X86_FEATURE_* flag in:
@@ -41,18 +47,30 @@
 // Coreboot* indicates (synth) or (uarch synth) decoding for which I have seen
 // no documentation, but which is used by coreboot, BIOS replacement software.
 // The core information is in:
+//    src/include/cpu/intel/cpu_ids.h
 //    src/soc/intel/common/block/include/intelblocks/mp_init.h
-//    src/soc/intel/*/include/soc/cpu.h
+//    src/soc/intel/*/include/soc/cpu.h (old)
 // And strings, for the less obvious cases, are in:
 //    src/soc/intel/*/bootblock/report_platform.c
 
+// DPTF* indicates (synth) or (uarch synth) decoding for which I have seen
+// no documentation, but which is used by Intel DPTF, Intel Dynamic Tuning for
+// Chromium OS.  The core information is in:
+//    Common/esif_ccb_cpuid.h
+
 // Xen* indicates features that I have seen no documentation for, but which are
 // used by the Xen hypervisor.  They are listed in:
-//    tools/libxl/libxl_cpuid.c
+//    xen/include/public/arch-x86/cpuid.h
+//    tools/libxl/libxl_cpuid.c (old)
 
 // Qemu* indicates features that I have seen no documentation for, but which are
 // used by the Qemu hypervisor.  They are listed in:
 //    target/i386/cpu.c
+
+// Google_cpu_features* indicates features that I have seen no documentation for,
+// but which are used by the Google cpu_features library.  They are listed in:
+//    include/cpuinfo_x86.h
+//    src/impl_x86__base_implementation.inl
 
 // SKC* indicates features that I have seen no (or incomplete) documentation
 // for, but which were sent to me in patch form by Smita Koralahalli
@@ -63,8 +81,20 @@
 #define USE_KERNEL_SCHED_SETAFFINITY
 #endif
 
+#if defined(__sun)
+#define USE_PROCESSOR_BIND
+#endif
+
+#if defined(__GNUC__) && defined(__GNUC_MINOR__) && defined(__GNUC_PATCHLEVEL__)
 #if __GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__ >= 40300
 #define USE_CPUID_COUNT
+#endif
+#endif
+
+#if defined(__GNUC__) && defined(__GNUC_MINOR__) && defined(__GNUC_PATCHLEVEL__)
+#if __GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__ >= 30400
+#define USE_BUILTIN_CLZL
+#endif
 #endif
 
 #if defined(__GNUC__)
@@ -74,24 +104,24 @@
 #endif
 
 #define _GNU_SOURCE
-#include <stdio.h>
+#define _LARGEFILE64_SOURCE
+#include <unistd.h>
 #include <sys/types.h>
+
+#ifdef __CYGWIN__
+typedef off_t off64_t;
+#define lseek64 lseek
+#endif
+
+#include <stdio.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <regex.h>
 #include <getopt.h>
-
-#if defined(__sun)
-#include <sys/processor.h>
-#include <sys/procset.h>
-#include <strings.h>
-#include <pthread.h>
-#endif
 
 #ifdef USE_CPUID_MODULE
 #include <linux/major.h>
@@ -101,9 +131,16 @@
 #include <cpuid.h>
 #endif
 
-#ifdef USE_KERNEL_SCHED_SETAFFINITY
+#if defined(USE_KERNEL_SCHED_SETAFFINITY)
+#include <sys/sysmacros.h>
 #include <sys/syscall.h>
+#elif defined(USE_PROCESSOR_BIND)
+#include <sys/processor.h>
+#include <sys/procset.h>
+#include <strings.h>
+#include <pthread.h>
 #else
+#include <sys/cpuset.h>
 #include <sched.h>
 #endif
 
@@ -152,7 +189,7 @@ static boolean  strregexp(const char*  haystack,
       size_t  size = regerror(status, &re, NULL, 0);
       char*   buffer = malloc(size + 1);
       if (buffer == NULL || size + 1 == 0) {
-         fprintf(stderr, "%s: out of memory\n", program);
+         fprintf(stderr, "%s: out of memory (strregexp 1)\n", program);
          exit(1);
       }
       regerror(status, &re, buffer, size);
@@ -165,7 +202,7 @@ static boolean  strregexp(const char*  haystack,
       size_t  size = regerror(status, &re, NULL, 0);
       char*   buffer = malloc(size + 1);
       if (buffer == NULL || size + 1 == 0) {
-         fprintf(stderr, "%s: out of memory\n", program);
+         fprintf(stderr, "%s: out of memory (strregexp 2)\n", program);
          exit(1);
       }
       regerror(status, &re, buffer, size);
@@ -273,53 +310,55 @@ typedef enum {
    HYPERVISOR_VMWARE,
    HYPERVISOR_XEN,
    HYPERVISOR_KVM,
-   HYPERVISOR_MICROSOFT,
+   HYPERVISOR_MICROSOFT, // a.k.a Hyper-V, Viridian
+   HYPERVISOR_ACRN,
 } hypervisor_t;
 
-#define __F(v)     ((v) & 0x0ff00f00)
-#define __M(v)     ((v) & 0x000f00f0)
-#define __FM(v)    ((v) & 0x0fff0ff0)
-#define __FMS(v)   ((v) & 0x0fff0fff)
+#define MaskF(v)     ((v) & 0x0ff00f00)
+#define MaskM(v)     ((v) & 0x000f00f0)
+#define MaskFM(v)    ((v) & 0x0fff0ff0)
+#define MaskFMS(v)   ((v) & 0x0fff0fff)
 
-#define __TF(v)    ((v) & 0x0ff03f00)
-#define __TFM(v)   ((v) & 0x0fff3ff0)
-#define __TFMS(v)  ((v) & 0x0fff3fff)
+#define MaskTF(v)    ((v) & 0x0ff03f00)
+#define MaskTFM(v)   ((v) & 0x0fff3ff0)
+#define MaskTFMS(v)  ((v) & 0x0fff3fff)
 
-#define _T(v)      ((v) << 12)
-#define _F(v)      ((v) << 8)
-#define _M(v)      ((v) << 4)
-#define _S(v)      (v)
-#define _XF(v)     ((v) << 20)
-#define _XM(v)     ((v) << 16)
+#define ShftT(v)     ((v) << 12)
+#define ShftF(v)     ((v) << 8)
+#define ShftM(v)     ((v) << 4)
+#define ShftS(v)     (v)
+#define ShftXF(v)    ((v) << 20)
+#define ShftXM(v)    ((v) << 16)
 
-#define __B(v)     ((v) & 0x000000ff)
-#define _B(v)      (v)
+// These two use val_1_ebx, in contrast to all the others that use val_1_eax.
+#define MaskB(v)     ((v) & 0x000000ff)
+#define ShftB(v)     (v)
 
-#define _FM(xf,f,xm,m)     (_XF(xf) + _F(f) + _XM(xm) + _M(m))
-#define _FMS(xf,f,xm,m,s)  (_XF(xf) + _F(f) + _XM(xm) + _M(m) + _S(s))
+#define ShftFM(xf,f,xm,m)     (ShftXF(xf) + ShftF(f) + ShftXM(xm) + ShftM(m))
+#define ShftFMS(xf,f,xm,m,s)  (ShftXF(xf) + ShftF(f) + ShftXM(xm) + ShftM(m) + ShftS(s))
 
 #define START \
    if (0)
 #define F(xf,f,...) \
-   else if (__F(val)    ==       _XF(xf)        +_F(f)                              ) ACT(__VA_ARGS__)
+   else if (MaskF(val)    ==          ShftXF(xf)           +ShftF(f)                                    ) ACT(__VA_ARGS__)
 #define FM(xf,f,xm,m,...) \
-   else if (__FM(val)   ==       _XF(xf)+_XM(xm)+_F(f)+_M(m)                        ) ACT(__VA_ARGS__)
+   else if (MaskFM(val)   ==          ShftXF(xf)+ShftXM(xm)+ShftF(f)+ShftM(m)                           ) ACT(__VA_ARGS__)
 #define FMS(xf,f,xm,m,s,...) \
-   else if (__FMS(val)  ==       _XF(xf)+_XM(xm)+_F(f)+_M(m)+_S(s)                  ) ACT(__VA_ARGS__)
+   else if (MaskFMS(val)  ==          ShftXF(xf)+ShftXM(xm)+ShftF(f)+ShftM(m)+ShftS(s)                  ) ACT(__VA_ARGS__)
 #define TF(t,xf,f,...) \
-   else if (__TF(val)   == _T(t)+_XF(xf)        +_F(f)                              ) ACT(__VA_ARGS__)
+   else if (MaskTF(val)   == ShftT(t)+ShftXF(xf)           +ShftF(f)                                    ) ACT(__VA_ARGS__)
 #define TFM(t,xf,f,xm,m,...) \
-   else if (__TFM(val)  == _T(t)+_XF(xf)+_XM(xm)+_F(f)+_M(m)                        ) ACT(__VA_ARGS__)
+   else if (MaskTFM(val)  == ShftT(t)+ShftXF(xf)+ShftXM(xm)+ShftF(f)+ShftM(m)                           ) ACT(__VA_ARGS__)
 #define TFMS(t,xf,f,xm,m,s,...) \
-   else if (__TFMS(val) == _T(t)+_XF(xf)+_XM(xm)+_F(f)+_M(m)+_S(s)                  ) ACT(__VA_ARGS__)
+   else if (MaskTFMS(val) == ShftT(t)+ShftXF(xf)+ShftXM(xm)+ShftF(f)+ShftM(m)+ShftS(s)                  ) ACT(__VA_ARGS__)
 #define FQ(xf,f,q,...) \
-   else if (__F(val)    ==       _XF(xf)        +_F(f)             && (stash) && (q)) ACT(__VA_ARGS__)
+   else if (MaskF(val)    ==          ShftXF(xf)           +ShftF(f)                   && (stash) && (q)) ACT(__VA_ARGS__)
 #define FMQ(xf,f,xm,m,q,...) \
-   else if (__FM(val)   ==       _XF(xf)+_XM(xm)+_F(f)+_M(m)       && (stash) && (q)) ACT(__VA_ARGS__)
+   else if (MaskFM(val)   ==          ShftXF(xf)+ShftXM(xm)+ShftF(f)+ShftM(m)          && (stash) && (q)) ACT(__VA_ARGS__)
 #define FMSQ(xf,f,xm,m,s,q,...) \
-   else if (__FMS(val)  ==       _XF(xf)+_XM(xm)+_F(f)+_M(m)+_S(s) && (stash) && (q)) ACT(__VA_ARGS__)
+   else if (MaskFMS(val)  ==          ShftXF(xf)+ShftXM(xm)+ShftF(f)+ShftM(m)+ShftS(s) && (stash) && (q)) ACT(__VA_ARGS__)
 #define DEFAULT(...) \
-   else                                                                               ACT(__VA_ARGS__)
+   else                                                                                                   ACT(__VA_ARGS__)
 #define FALLBACK(...) \
    else __VA_ARGS__
 
@@ -406,10 +445,14 @@ typedef struct {
          boolean    ultra;
          boolean    t_suffix;
          boolean    ryzen;
+         boolean    threadripper;
          boolean    epyc;
          boolean    epyc_3000;
+         boolean    montage;
 
          boolean    embedded;
+         boolean    embedded_V;
+         boolean    embedded_R;
          int        cores;
       };
       struct /* Cyrix */ {
@@ -472,8 +515,8 @@ typedef struct {
                       { FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, \
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, \
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, \
-                        FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, \
-                        FALSE, 0 }, \
+                        FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, \
+                        FALSE, FALSE, FALSE, FALSE, 0 }, \
                       { FALSE }, \
                       { FALSE, FALSE, FALSE, FALSE, FALSE } }, \
                     { FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE }, \
@@ -493,8 +536,8 @@ decode_amd_model(const code_stash_t*  stash,
 
    if (stash == NULL) return;
 
-   if (__F(stash->val_1_eax) == _XF(0) + _F(15)
-       && __M(stash->val_1_eax) < _XM(4) + _M(0)) {
+   if (MaskF(stash->val_1_eax) == ShftXF(0) + ShftF(15)
+       && MaskM(stash->val_1_eax) < ShftXM(4) + ShftM(0)) {
       /*
       ** Algorithm from:
       **    Revision Guide for AMD Athlon 64 and AMD Opteron Processors 
@@ -504,9 +547,9 @@ decode_amd_model(const code_stash_t*  stash,
       unsigned int  bti;
       unsigned int  NN;
 
-      if (__B(stash->val_1_ebx) != 0) {
-         bti = BIT_EXTRACT_LE(__B(stash->val_1_ebx), 5, 8) << 2;
-         NN  = BIT_EXTRACT_LE(__B(stash->val_1_ebx), 0, 5);
+      if (MaskB(stash->val_1_ebx) != 0) {
+         bti = BIT_EXTRACT_LE(MaskB(stash->val_1_ebx), 5, 8) << 2;
+         NN  = BIT_EXTRACT_LE(MaskB(stash->val_1_ebx), 0, 5);
       } else if (BIT_EXTRACT_LE(stash->val_80000001_ebx, 0, 12) != 0) {
          bti = BIT_EXTRACT_LE(stash->val_80000001_ebx, 6, 12);
          NN  = BIT_EXTRACT_LE(stash->val_80000001_ebx, 0,  6);
@@ -621,6 +664,17 @@ decode_amd_model(const code_stash_t*  stash,
          sprintf(proc, "FX-%02d", ZZ);
          break;
       case 0x29:
+         *brand_pre = "Dual Core AMD Opteron(tm)";
+         sprintf(proc, "Processor 1%02d SE", RR);
+         break;
+      case 0x2a:
+         *brand_pre = "Dual Core AMD Opteron(tm)";
+         sprintf(proc, "Processor 2%02d SE", RR);
+         break;
+      case 0x2b:
+         *brand_pre = "Dual Core AMD Opteron(tm)";
+         sprintf(proc, "Processor 8%02d SE", RR);
+         break;
       case 0x2c:
       case 0x2d:
       case 0x38:
@@ -628,7 +682,6 @@ decode_amd_model(const code_stash_t*  stash,
          *brand_pre = "Dual Core AMD Opteron(tm)";
          sprintf(proc, "Processor 1%02d", RR);
          break;
-      case 0x2a:
       case 0x30:
       case 0x31:
       case 0x39:
@@ -636,7 +689,6 @@ decode_amd_model(const code_stash_t*  stash,
          *brand_pre = "Dual Core AMD Opteron(tm)";
          sprintf(proc, "Processor 2%02d", RR);
          break;
-      case 0x2b:
       case 0x34:
       case 0x35:
       case 0x3a:
@@ -676,8 +728,8 @@ decode_amd_model(const code_stash_t*  stash,
 #undef TT
 #undef RR
 #undef EE
-   } else if (__F(stash->val_1_eax) == _XF(0) + _F(15)
-              && __M(stash->val_1_eax) >= _XM(4) + _M(0)) {
+   } else if (MaskF(stash->val_1_eax) == ShftXF(0) + ShftF(15)
+              && MaskM(stash->val_1_eax) >= ShftXM(4) + ShftM(0)) {
       /*
       ** Algorithm from:
       **    Revision Guide for AMD NPT Family 0Fh Processors (33610 Rev 3.46),
@@ -936,10 +988,10 @@ decode_amd_model(const code_stash_t*  stash,
 #undef TT
 #undef ZZ
 #undef YY
-   } else if (__F(stash->val_1_eax) == _XF(1) + _F(15)
-              || __F(stash->val_1_eax) == _XF(2) + _F(15)
-              || __F(stash->val_1_eax) == _XF(3) + _F(15)
-              || __F(stash->val_1_eax) == _XF(5) + _F(15)) {
+   } else if (MaskF(stash->val_1_eax) == ShftXF(1) + ShftF(15)
+              || MaskF(stash->val_1_eax) == ShftXF(2) + ShftF(15)
+              || MaskF(stash->val_1_eax) == ShftXF(3) + ShftF(15)
+              || MaskF(stash->val_1_eax) == ShftXF(5) + ShftF(15)) {
       /*
       ** Algorithm from:
       **    AMD Revision Guide for AMD Family 10h Processors (41322 Rev 3.74)
@@ -976,7 +1028,7 @@ decode_amd_model(const code_stash_t*  stash,
       ** But that produces the same result as an undefined string, so
       ** don't bother trying to handle them.
       */
-      if (__F(stash->val_1_eax) == _XF(1) + _F(15)) {
+      if (MaskF(stash->val_1_eax) == ShftXF(1) + ShftF(15)) {
          if (pkgtype >= 2) {
             partialmodel--;
          }
@@ -1192,7 +1244,7 @@ decode_amd_model(const code_stash_t*  stash,
             s2 = NULL;
             break;
          }
-      } else if (__F(stash->val_1_eax) == _XF(2) + _F(15)) {
+      } else if (MaskF(stash->val_1_eax) == ShftXF(2) + ShftF(15)) {
          /* Family 11h tables */
          switch (pkgtype) {
          case 2:
@@ -1218,7 +1270,7 @@ decode_amd_model(const code_stash_t*  stash,
             s2 = NULL;
             break;
          }
-      } else if (__F(stash->val_1_eax) == _XF(3) + _F(15)) {
+      } else if (MaskF(stash->val_1_eax) == ShftXF(3) + ShftF(15)) {
          partialmodel--;
 
          /* Family 12h tables */
@@ -1270,7 +1322,7 @@ decode_amd_model(const code_stash_t*  stash,
             s2 = NULL;
             break;
          }
-      } else if (__F(stash->val_1_eax) == _XF(5) + _F(15)) {
+      } else if (MaskF(stash->val_1_eax) == ShftXF(5) + ShftF(15)) {
          partialmodel--;
 
          /* Family 14h Models 00h-0Fh tables */
@@ -1471,50 +1523,50 @@ decode_brand_id_stash(code_stash_t*  stash)
    unsigned int  val_1_eax = stash->val_1_eax;
    unsigned int  val_1_ebx = stash->val_1_ebx;
 
-   switch (__B(val_1_ebx)) {
-   case _B(0):  break;
-   case _B(1):  stash->bri.desktop_celeron = TRUE; break;
-   case _B(2):  stash->bri.desktop_pentium = TRUE; break;
-   case _B(3):  if ( __FMS(val_1_eax) == _FMS(0,6, 0,11, 1)) {
-                   stash->bri.desktop_celeron = TRUE;
-                } else {
-                   stash->bri.xeon = TRUE;
-                }
-                break;
-   case _B(4):  stash->bri.desktop_pentium = TRUE; break;
-   case _B(6):  stash->bri.desktop_pentium = TRUE; break;
-   case _B(7):  stash->bri.desktop_celeron = TRUE; break;
-   case _B(8):  stash->bri.desktop_pentium = TRUE; break;
-   case _B(9):  stash->bri.desktop_pentium = TRUE; break;
-   case _B(10): stash->bri.desktop_celeron = TRUE; break;
-   case _B(11): if (__FMS(val_1_eax) <= _FMS(0,15, 0,1, 2)) {
-                   stash->bri.xeon_mp = TRUE;
-                } else {
-                   stash->bri.xeon = TRUE;
-                }
-                break;
-   case _B(12): stash->bri.xeon_mp         = TRUE; break;
-   case _B(14): if (__FMS(val_1_eax) <= _FMS(0,15, 0,1, 3)) {
-                   stash->bri.xeon = TRUE;
-                } else {
-                   stash->bri.mobile_pentium_m = TRUE;
-                }
-                break;
-   case _B(15): if (__FM(val_1_eax) == _FM (0,15, 0,2)) {
-                   stash->bri.mobile_pentium_m = TRUE;
-                } else {
-                   stash->bri.mobile_celeron = TRUE;
-                }
-                break;
-   case _B(16): stash->bri.desktop_celeron = TRUE; break;
-   case _B(17): stash->bri.mobile_pentium  = TRUE; break;
-   case _B(18): stash->bri.desktop_celeron = TRUE; break;
-   case _B(19): stash->bri.mobile_celeron  = TRUE; break;
-   case _B(20): stash->bri.desktop_celeron = TRUE; break;
-   case _B(21): stash->bri.mobile_pentium  = TRUE; break;
-   case _B(22): stash->bri.desktop_pentium = TRUE; break;
-   case _B(23): stash->bri.mobile_celeron  = TRUE; break;
-   default:     break;
+   switch (MaskB(val_1_ebx)) {
+   case ShftB(0):  break;
+   case ShftB(1):  stash->bri.desktop_celeron = TRUE; break;
+   case ShftB(2):  stash->bri.desktop_pentium = TRUE; break;
+   case ShftB(3):  if (MaskFMS(val_1_eax) == ShftFMS(0,6, 0,11, 1)) {
+                      stash->bri.desktop_celeron = TRUE;
+                   } else {
+                      stash->bri.xeon = TRUE;
+                   }
+                   break;
+   case ShftB(4):  stash->bri.desktop_pentium = TRUE; break;
+   case ShftB(6):  stash->bri.desktop_pentium = TRUE; break;
+   case ShftB(7):  stash->bri.desktop_celeron = TRUE; break;
+   case ShftB(8):  stash->bri.desktop_pentium = TRUE; break;
+   case ShftB(9):  stash->bri.desktop_pentium = TRUE; break;
+   case ShftB(10): stash->bri.desktop_celeron = TRUE; break;
+   case ShftB(11): if (MaskFMS(val_1_eax) <= ShftFMS(0,15, 0,1, 2)) {
+                      stash->bri.xeon_mp = TRUE;
+                   } else {
+                      stash->bri.xeon = TRUE;
+                   }
+                   break;
+   case ShftB(12): stash->bri.xeon_mp         = TRUE; break;
+   case ShftB(14): if (MaskFMS(val_1_eax) <= ShftFMS(0,15, 0,1, 3)) {
+                      stash->bri.xeon = TRUE;
+                   } else {
+                      stash->bri.mobile_pentium_m = TRUE;
+                   }
+                   break;
+   case ShftB(15): if (MaskFM(val_1_eax) == ShftFM(0,15, 0,2)) {
+                      stash->bri.mobile_pentium_m = TRUE;
+                   } else {
+                      stash->bri.mobile_celeron = TRUE;
+                   }
+                   break;
+   case ShftB(16): stash->bri.desktop_celeron = TRUE; break;
+   case ShftB(17): stash->bri.mobile_pentium  = TRUE; break;
+   case ShftB(18): stash->bri.desktop_celeron = TRUE; break;
+   case ShftB(19): stash->bri.mobile_celeron  = TRUE; break;
+   case ShftB(20): stash->bri.desktop_celeron = TRUE; break;
+   case ShftB(21): stash->bri.mobile_pentium  = TRUE; break;
+   case ShftB(22): stash->bri.desktop_pentium = TRUE; break;
+   case ShftB(23): stash->bri.mobile_celeron  = TRUE; break;
+   default:        break;
    }
 }
 
@@ -1522,67 +1574,71 @@ static void
 decode_brand_string(const char*    brand,
                     code_stash_t*  stash)
 {
-   stash->br.mobile      = (strstr(brand, "Mobile") != NULL
-                            || strstr(brand, "mobile") != NULL);
+   stash->br.mobile       = (strstr(brand, "Mobile") != NULL
+                             || strstr(brand, "mobile") != NULL);
 
-   stash->br.celeron     = strstr(brand, "Celeron") != NULL;
-   stash->br.core        = strstr(brand, "Core(TM)") != NULL;
-   stash->br.pentium     = strstr(brand, "Pentium") != NULL;
-   stash->br.atom        = strstr(brand, "Atom") != NULL;
-   stash->br.xeon_mp     = (strstr(brand, "Xeon MP") != NULL
-                            || strstr(brand, "Xeon(TM) MP") != NULL
-                            || strstr(brand, "Xeon(R)") != NULL);
-   stash->br.xeon        = strstr(brand, "Xeon") != NULL;
-   stash->br.pentium_m   = strstr(brand, "Pentium(R) M") != NULL;
-   stash->br.pentium_d   = strstr(brand, "Pentium(R) D") != NULL;
-   stash->br.extreme     = strregexp(brand, " ?X[0-9][0-9][0-9][0-9]");
-   stash->br.generic     = strstr(brand, "Genuine Intel(R) CPU") != NULL;
-   stash->br.scalable    = (strstr(brand, "Bronze") != NULL
-                            || strstr(brand, "Silver") != NULL
-                            || strstr(brand, "Gold") != NULL
-                            || strstr(brand, "Platinum") != NULL);
-   stash->br.u_line      = (strregexp(brand, "Core.* [im][3579]-[0-9]*U")
-                            || strregexp(brand, "Pentium.* [0-9]*U")
-                            || strregexp(brand, "Celeron.* [0-9]*U"));
-   stash->br.y_line      = (strregexp(brand, "Core.* [im][3579]-[0-9]*Y")
-                            || strregexp(brand, "Pentium.* [0-9]*Y")
-                            || strregexp(brand, "Celeron.* [0-9]*Y"));
-   stash->br.g_line      = strregexp(brand, "Core.* [im][3579]-[0-9]*G");
-   stash->br.i_8000      = strregexp(brand, "Core.* [im][3579]-8[0-9][0-9][0-9]");
-   stash->br.i_10000     = strregexp(brand, "Core.* i[3579]-10[0-9][0-9][0-9]");
-   stash->br.cc150       = strregexp(brand, "CC150");
+   stash->br.celeron      = strstr(brand, "Celeron") != NULL;
+   stash->br.core         = strstr(brand, "Core(TM)") != NULL;
+   stash->br.pentium      = strstr(brand, "Pentium") != NULL;
+   stash->br.atom         = strstr(brand, "Atom") != NULL;
+   stash->br.xeon_mp      = (strstr(brand, "Xeon MP") != NULL
+                             || strstr(brand, "Xeon(TM) MP") != NULL
+                             || strstr(brand, "Xeon(R)") != NULL);
+   stash->br.xeon         = strstr(brand, "Xeon") != NULL;
+   stash->br.pentium_m    = strstr(brand, "Pentium(R) M") != NULL;
+   stash->br.pentium_d    = strstr(brand, "Pentium(R) D") != NULL;
+   stash->br.extreme      = strregexp(brand, " ?X[0-9][0-9][0-9][0-9]");
+   stash->br.generic      = strstr(brand, "Genuine Intel(R) CPU") != NULL;
+   stash->br.scalable     = (strstr(brand, "Bronze") != NULL
+                             || strstr(brand, "Silver") != NULL
+                             || strstr(brand, "Gold") != NULL
+                             || strstr(brand, "Platinum") != NULL);
+   stash->br.u_line       = (strregexp(brand, "Core.* [im][3579]-[0-9]*U")
+                             || strregexp(brand, "Pentium.* [0-9]*U")
+                             || strregexp(brand, "Celeron.* [0-9]*U"));
+   stash->br.y_line       = (strregexp(brand, "Core.* [im][3579]-[0-9]*Y")
+                             || strregexp(brand, "Pentium.* [0-9]*Y")
+                             || strregexp(brand, "Celeron.* [0-9]*Y"));
+   stash->br.g_line       = strregexp(brand, "Core.* [im][3579]-[0-9]*G");
+   stash->br.i_8000       = strregexp(brand, "Core.* [im][3579]-8[0-9][0-9][0-9]");
+   stash->br.i_10000      = strregexp(brand, "Core.* i[3579]-10[0-9][0-9][0-9]");
+   stash->br.cc150        = strregexp(brand, "CC150");
 
-   stash->br.athlon_lv   = strstr(brand, "Athlon(tm) XP-M (LV)") != NULL;
-   stash->br.athlon_xp   = (strstr(brand, "Athlon(tm) XP") != NULL
-                            || strstr(brand, "Athlon(TM) XP") != NULL);
-   stash->br.duron       = strstr(brand, "Duron") != NULL;
-   stash->br.athlon      = strstr(brand, "Athlon") != NULL;
-   stash->br.sempron     = strstr(brand, "Sempron") != NULL;
-   stash->br.phenom      = strstr(brand, "Phenom") != NULL;
-   stash->br.series      = strstr(brand, "Series") != NULL;
-   stash->br.a_series    = (strstr(brand, "AMD A") != NULL
-                            || strstr(brand, "AMD PRO A") != NULL);
-   stash->br.c_series    = strstr(brand, "AMD C") != NULL;
-   stash->br.e_series    = strstr(brand, "AMD E") != NULL;
-   stash->br.g_series    = strstr(brand, "AMD G") != NULL;
-   stash->br.r_series    = strstr(brand, "AMD R") != NULL;
-   stash->br.z_series    = strstr(brand, "AMD Z") != NULL;
-   stash->br.geode       = strstr(brand, "Geode") != NULL;
-   stash->br.turion      = strstr(brand, "Turion") != NULL;
-   stash->br.neo         = strstr(brand, "Neo") != NULL;
-   stash->br.athlon_fx   = strstr(brand, "Athlon(tm) 64 FX") != NULL;
-   stash->br.athlon_mp   = strstr(brand, "Athlon(tm) MP") != NULL;
-   stash->br.duron_mp    = strstr(brand, "Duron(tm) MP") != NULL;
-   stash->br.opteron     = strstr(brand, "Opteron") != NULL;
-   stash->br.fx          = strstr(brand, "AMD FX") != NULL;
-   stash->br.firepro     = strstr(brand, "Firepro") != NULL; // total guess
-   stash->br.ultra       = strstr(brand, "Ultra") != NULL;
-   stash->br.t_suffix    = strregexp(brand, "[0-9][0-9][0-9][0-9]T");
-   stash->br.ryzen       = strstr(brand, "Ryzen") != NULL;
-   stash->br.epyc        = strstr(brand, "EPYC") != NULL;
-   stash->br.epyc_3000   = strregexp(brand, "EPYC 3[0-9][0-9][0-9]");
+   stash->br.athlon_lv    = strstr(brand, "Athlon(tm) XP-M (LV)") != NULL;
+   stash->br.athlon_xp    = (strstr(brand, "Athlon(tm) XP") != NULL
+                             || strstr(brand, "Athlon(TM) XP") != NULL);
+   stash->br.duron        = strstr(brand, "Duron") != NULL;
+   stash->br.athlon       = strstr(brand, "Athlon") != NULL;
+   stash->br.sempron      = strstr(brand, "Sempron") != NULL;
+   stash->br.phenom       = strstr(brand, "Phenom") != NULL;
+   stash->br.series       = strstr(brand, "Series") != NULL;
+   stash->br.a_series     = (strstr(brand, "AMD A") != NULL
+                             || strstr(brand, "AMD PRO A") != NULL);
+   stash->br.c_series     = strstr(brand, "AMD C") != NULL;
+   stash->br.e_series     = strstr(brand, "AMD E") != NULL;
+   stash->br.g_series     = strstr(brand, "AMD G") != NULL;
+   stash->br.r_series     = strstr(brand, "AMD R") != NULL;
+   stash->br.z_series     = strstr(brand, "AMD Z") != NULL;
+   stash->br.geode        = strstr(brand, "Geode") != NULL;
+   stash->br.turion       = strstr(brand, "Turion") != NULL;
+   stash->br.neo          = strstr(brand, "Neo") != NULL;
+   stash->br.athlon_fx    = strstr(brand, "Athlon(tm) 64 FX") != NULL;
+   stash->br.athlon_mp    = strstr(brand, "Athlon(tm) MP") != NULL;
+   stash->br.duron_mp     = strstr(brand, "Duron(tm) MP") != NULL;
+   stash->br.opteron      = strstr(brand, "Opteron") != NULL;
+   stash->br.fx           = strstr(brand, "AMD FX") != NULL;
+   stash->br.firepro      = strstr(brand, "Firepro") != NULL; // total guess
+   stash->br.ultra        = strstr(brand, "Ultra") != NULL;
+   stash->br.t_suffix     = strregexp(brand, "[0-9][0-9][0-9][0-9]T");
+   stash->br.ryzen        = strstr(brand, "Ryzen") != NULL;
+   stash->br.threadripper = strstr(brand, "Threadripper") != NULL;
+   stash->br.epyc         = strstr(brand, "EPYC") != NULL;
+   stash->br.epyc_3000    = strregexp(brand, "EPYC 3[0-9][0-9][0-9]");
+   stash->br.montage      = strstr(brand, "Montage(R)") != NULL;
 
-   stash->br.embedded    = strstr(brand, "Embedded") != NULL;
+   stash->br.embedded     = strstr(brand, "Embedded") != NULL;
+   stash->br.embedded_V   = strstr(brand, "Embedded V") != NULL;
+   stash->br.embedded_R   = strstr(brand, "Embedded R") != NULL;
    if (strstr(brand, "Dual Core") != NULL
        || strstr(brand, " X2 ") != NULL) {
       stash->br.cores = 2;
@@ -1656,12 +1712,7 @@ decode_brand_stash(code_stash_t*  stash)
             || stash->bri.desktop_celeron)
 #define da (is_intel && stash->br.atom) 
 #define dd (is_intel && stash->br.pentium_d)
-#define TODD_WAS_HERE
-#ifdef TODD_WAS_HERE
 #define dc (is_intel && !is_mobile && stash->br.core)
-#else
-#define dc (is_intel && !is_mobile && (stash->br.core || stash->br.generic))
-#endif
 #define sX ((is_intel && stash->br.xeon) || stash->bri.xeon)
 #define sM ((is_intel && stash->br.xeon_mp) \
             || stash->bri.xeon_mp)
@@ -1682,6 +1733,7 @@ decode_brand_stash(code_stash_t*  stash)
 #define YC (dC && stash->br.y_line)
 #define YP (dP && stash->br.y_line)
 #define d1 (is_intel && stash->br.cc150)
+#define iM (is_intel && stash->br.montage)
 
 /* 
 ** Intel special cases 
@@ -1743,6 +1795,8 @@ decode_brand_stash(code_stash_t*  stash)
 ** T? = think "Tablet"
 ** A? = think "any"
 ** E? = think "Embedded"
+** V? = think "Embedded V"
+** R? = think "Embedded R"
 **
 ** ?A = think Athlon
 ** ?X = think Athlon XP
@@ -1757,6 +1811,7 @@ decode_brand_stash(code_stash_t*  stash)
 ** ?U = think Turion Ultra
 ** ?p = think Phenom
 ** ?R = think Ryzen
+** ?H = think Threadripper
 ** ?s = think ?-Series
 ** ?n = think Turion Neo
 ** ?N = think Neo
@@ -1770,6 +1825,7 @@ decode_brand_stash(code_stash_t*  stash)
 #define dp (is_amd && !is_mobile && stash->br.phenom)
 #define dI (is_amd && !is_mobile && stash->br.firepro)
 #define dR (is_amd && !is_mobile && stash->br.ryzen)
+#define dH (is_amd && !is_mobile && stash->br.threadripper)
 #define sO (is_amd && !is_mobile && stash->br.opteron)
 #define sA (is_amd && !is_mobile && stash->br.athlon_mp)
 #define sD (is_amd && !is_mobile && stash->br.duron_mp)
@@ -1797,6 +1853,8 @@ decode_brand_stash(code_stash_t*  stash)
 #define Te (is_amd && stash->br.t_suffix && stash->br.e_series)
 #define AR (is_amd && stash->br.ryzen)
 #define ER (is_amd && stash->br.ryzen && stash->br.embedded)
+#define VR (is_amd && stash->br.ryzen && stash->br.embedded_V)
+#define RR (is_amd && stash->br.ryzen && stash->br.embedded_R)
 #define EE (is_amd && stash->br.epyc_3000)
 
 /*
@@ -1813,14 +1871,14 @@ static boolean is_amd_egypt_athens_8xx(const code_stash_t*  stash)
    */
 
    if (stash->vendor == VENDOR_AMD && stash->br.opteron) {
-      switch (__FM(stash->val_1_eax)) {
-      case _FM(0,15, 2,1): /* Italy/Egypt */
-      case _FM(0,15, 2,5): /* Troy/Athens */
+      switch (MaskFM(stash->val_1_eax)) {
+      case ShftFM(0,15, 2,1): /* Italy/Egypt */
+      case ShftFM(0,15, 2,5): /* Troy/Athens */
          {
             unsigned int  bti;
 
-            if (__B(stash->val_1_ebx) != 0) {
-               bti = BIT_EXTRACT_LE(__B(stash->val_1_ebx), 5, 8) << 2;
+            if (MaskB(stash->val_1_ebx) != 0) {
+               bti = BIT_EXTRACT_LE(MaskB(stash->val_1_ebx), 5, 8) << 2;
             } else if (BIT_EXTRACT_LE(stash->val_80000001_ebx, 0, 12) != 0) {
                bti = BIT_EXTRACT_LE(stash->val_80000001_ebx, 6, 12);
             } else {
@@ -1928,7 +1986,11 @@ decode_vendor(vendor_t             vendor,
               const code_stash_t*  stash)
 {
    switch (vendor) {
-   case VENDOR_INTEL:     return "Intel";
+   case VENDOR_INTEL:     if (stash->br.montage) {
+                             return "Montage";
+                          } else {
+                             return "Intel";
+                          }
    case VENDOR_AMD:       return "AMD";
    case VENDOR_CYRIX:     return "Cyrix";
    case VENDOR_VIA:       if (stash->br.zhaoxin) {
@@ -1974,8 +2036,9 @@ init_arch(arch_t*  arch)
 }
 
 static void
-decode_uarch_intel(unsigned int  val,
-                   arch_t*       arch)
+decode_uarch_intel(unsigned int         val,
+                   arch_t*              arch,
+                   const code_stash_t*  stash)
 {
    init_arch(arch);
    
@@ -2005,7 +2068,6 @@ decode_uarch_intel(unsigned int  val,
    //
    // That is a more manageable set.
    //
-   // NOTE: Ice Lake & Tiger Lake cores are in the separate Sunny Cove uarch.
 
    START;
    F   (    0, 4,                                                               *f = "i486");          // *p depends on core
@@ -2062,49 +2124,65 @@ decode_uarch_intel(unsigned int  val,
    FM  (    0, 6,  4,10,         *u = "Silvermont",                                                    *p = "22nm"); // no docs, but /proc/cpuinfo seen in wild
    FM  (    0, 6,  4,12,         *u = "Airmont",                                                       *p = "14nm");
    FM  (    0, 6,  4,13,         *u = "Silvermont",                                                    *p = "22nm");
-   FMS (    0, 6,  4,14,  8,     *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm");
+   FMS (    0, 6,  4,14,  8,     *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm+");
    FM  (    0, 6,  4,14,         *u = "Skylake",                   *ciu = TRUE, *f = "Skylake",        *p = "14nm");
    FM  (    0, 6,  4,15,         *u = "Broadwell",                 *ciu = TRUE, *f = "Haswell",        *p = "14nm");
-   FMS (    0, 6,  5, 5,  6,     *u = "Cascade Lake",              *ciu = TRUE, *f = "Skylake",        *p = "14nm"); // no docs, but example from Greg Stewart
-   FMS (    0, 6,  5, 5,  7,     *u = "Cascade Lake",              *ciu = TRUE, *f = "Skylake",        *p = "14nm");
-   FMS (    0, 6,  5, 5, 10,     *u = "Cooper Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm");
+   FMQ (    0, 6,  5, 5,     iM, *u = "Jintide Gen1",              *ciu = TRUE);                                     // undocumented; only instlatx64 example
+   FMS (    0, 6,  5, 5,  6,     *u = "Cascade Lake",              *ciu = TRUE, *f = "Skylake",        *p = "14nm++"); // no docs, but example from Greg Stewart
+   FMS (    0, 6,  5, 5,  7,     *u = "Cascade Lake",              *ciu = TRUE, *f = "Skylake",        *p = "14nm++");
+   FMS (    0, 6,  5, 5, 10,     *u = "Cooper Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm++");
    FM  (    0, 6,  5, 5,         *u = "Skylake",                   *ciu = TRUE, *f = "Skylake",        *p = "14nm");
    FM  (    0, 6,  5, 6,         *u = "Broadwell",                 *ciu = TRUE, *f = "Haswell",        *p = "14nm");
    FM  (    0, 6,  5, 7,         *u = "Knights Landing",           *ciu = TRUE,                        *p = "14nm");
    FM  (    0, 6,  5,10,         *u = "Silvermont",                                                    *p = "22nm"); // no spec update; only MSR_CPUID_table* so far
    FM  (    0, 6,  5,12,         *u = "Goldmont",                                                      *p = "14nm"); // no spec update for Atom; only MSR_CPUID_table* so far
    FM  (    0, 6,  5,13,         *u = "Silvermont",                                                    *p = "22nm"); // no spec update; only MSR_CPUID_table* so far
-   FMS (    0, 6,  5,14,  8,     *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm");
+   FMS (    0, 6,  5,14,  8,     *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm+");
    FM  (    0, 6,  5,14,         *u = "Skylake",                   *ciu = TRUE, *f = "Skylake",        *p = "14nm");
    FM  (    0, 6,  5,15,         *u = "Goldmont",                                                      *p = "14nm");
    FM  (    0, 6,  6, 6,         *u = "Palm Cove",                              *f = "Skylake",        *p = "10nm"); // no spec update; only MSR_CPUID_table* so far
-   FM  (    0, 6,  6,10,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm"); // no spec update; only MSR_CPUID_table* so far
-   FM  (    0, 6,  6,12,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm"); // no spec update; only MSR_CPUID_table* so far
+   FM  (    0, 6,  6, 7,         *u = "Palm Cove",                              *f = "Skylake",        *p = "10nm"); // DPTF*
+   FM  (    0, 6,  6,10,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm+");
+   FM  (    0, 6,  6,12,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm+"); // no spec update; only MSR_CPUID_table* so far; DPTF* claims this is Meteor Lake S => Redwood Cove
+   FM  (    0, 6,  6,14,         *u = "Airmont",                                                       *p = "14nm"); // no spec update; only Intel's "Retpoline: A Branch Target Injection Mitigation"
    FM  (    0, 6,  7, 5,         *u = "Airmont",                                                       *p = "14nm"); // no spec update; whispers & rumors
    FM  (    0, 6,  7,10,         *u = "Goldmont Plus",                                                 *p = "14nm");
-   FM  (    0, 6,  7,13,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm"); // no spec update; only MSR_CPUID_table* so far
-   FM  (    0, 6,  7,14,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm");
+   FM  (    0, 6,  7,13,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm+"); // no spec update; only MSR_CPUID_table* so far
+   FM  (    0, 6,  7,14,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm+");
    FM  (    0, 6,  8, 5,         *u = "Knights Mill",              *ciu = TRUE,                        *p = "14nm"); // no spec update; only MSR_CPUID_table* so far
    FM  (    0, 6,  8, 6,         *u = "Tremont",                                                       *p = "10nm"); // LX*
    FM  (    0, 6,  8,10,         *u = "Tremont",                                                       *p = "10nm"); // no spec update; LX*
-   FM  (    0, 6,  8,12,         *u = "Willow Cove",                            *f = "Sunny Cove",     *p = "10nm"); // found only on en.wikichip.org
-   FM  (    0, 6,  8,13,         *u = "Willow Cove",                            *f = "Sunny Cove",     *p = "10nm"); // LX*
-   FM  (    0, 6,  8,14,         *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm");
-   FM  (    0, 6,  8,15,         *u = "Sapphire Rapids",                        *f = "Sunny Cove",     *p = "10nm"); // LX*
+   FM  (    0, 6,  8,12,         *u = "Willow Cove",                            *f = "Sunny Cove",     *p = "10nm++"); // no spec update; only MSR_CPUID_table* so far
+   FM  (    0, 6,  8,13,         *u = "Willow Cove",                            *f = "Sunny Cove",     *p = "10nm++"); // no spec update; only MSR_CPUID_table* so far
+   FM  (    0, 6,  8,14,         *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm+/14nm++");
+   FM  (    0, 6,  8,15,         *u = "Sapphire Rapids",                        *f = "Sunny Cove",     *p = "10nm+"); // LX*
    FM  (    0, 6,  9, 6,         *u = "Tremont",                                                       *p = "10nm"); // LX*
-   FM  (    0, 6,  9, 7,         *u = "Golden Cove",                                                   *p = "10nm"); // LX*
-   FM  (    0, 6,  9,10,         *u = "Golden Cove",                                                   *p = "10nm"); // Coreboot*
+   FM  (    0, 6,  9, 7,         *u = "Golden Cove",                                                   *p = "Intel 7");
+   FM  (    0, 6,  9,10,         *u = "Golden Cove",                                                   *p = "Intel 7"); // Coreboot*
    FM  (    0, 6,  9,12,         *u = "Tremont",                                                       *p = "10nm"); // LX*
-   FM  (    0, 6,  9,13,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm"); // LX*
-   FMS (    0, 6,  9,14,  9,     *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm");
-   FMS (    0, 6,  9,14, 10,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm");
-   FMS (    0, 6,  9,14, 11,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm");
-   FMS (    0, 6,  9,14, 12,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm");
-   FMS (    0, 6,  9,14, 13,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm");
-   FM  (    0, 6,  9,14,         *u = "Kaby Lake / Coffee Lake",                *f = "Skylake",        *p = "14nm");
-   FM  (    0, 6, 10, 5,         *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm"); // LX*
-   FM  (    0, 6, 10, 6,         *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm"); // no spec update; only instlatx64 example
-   FM  (    0, 6, 10, 7,         *u = "Rocket Lake",                            *f = "Sunny Cove",     *p = "14nm"); // LX*
+   FM  (    0, 6,  9,13,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm+"); // LX*
+   FMS (    0, 6,  9,14,  9,     *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm+");
+   FMS (    0, 6,  9,14, 10,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm++");
+   FMS (    0, 6,  9,14, 11,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm++");
+   FMS (    0, 6,  9,14, 12,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm++");
+   FMS (    0, 6,  9,14, 13,     *u = "Coffee Lake",               *ciu = TRUE, *f = "Skylake",        *p = "14nm++");
+   FM  (    0, 6,  9,14,         *u = "Kaby Lake / Coffee Lake",                *f = "Skylake",        *p = "14nm+/14nm++");
+   FM  (    0, 6,  9,15,         *u = "Sunny Cove",                             *f = "Sunny Cove",     *p = "10nm+"); // undocumented, but (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10, 5,         *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm+++"); // LX*
+   FM  (    0, 6, 10, 6,         *u = "Kaby Lake",                              *f = "Skylake",        *p = "14nm+++"); // no spec update; only instlatx64 example
+   FM  (    0, 6, 10, 7,         *u = "Cypress Cove",                           *f = "Sunny Cove",     *p = "14nm+++"); // LX*
+   FM  (    0, 6, 10, 8,         *u = "Cypress Cove",                           *f = "Sunny Cove",     *p = "14nm+++"); // undocumented, but (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10,10,         *u = "Redwood Cove",                           *f = "Golden Cove",    *p = "Intel 4"); // MSR_CPUID_table*; DPTF*, LX* (but -L); (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10,11,         *u = "Redwood Cove",                           *f = "Golden Cove",    *p = "Intel 4"); // DPTF*
+   FM  (    0, 6, 10,12,         *u = "Redwood Cove",                           *f = "Golden Cove",    *p = "Intel 4"); // MSR_CPUID_table*; (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10,13,         *u = "Granite Rapids",                         *f = "Golden Cove",    *p = "Intel 4"); // MSR_CPUID_table*; (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10,14,         *u = "Granite Rapids",                         *f = "Golden Cove",    *p = "Intel 4"); // MSR_CPUID_table*
+   FM  (    0, 6, 10,15,         *u = "Sierra Forest");                                                                 // MSR_CPUID_table*; (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 11, 5,         *u = "Redwood Cove",                           *f = "Golden Cove",    *p = "Intel 4"); // MSR_CPUID_table*
+   FM  (    0, 6, 11, 6,         *u = "Crestmont",                                                     *p = "Intel 7"); // MSR_CPUID_table* (although assumption that Grand Ridge is Crestmont)
+   FM  (    0, 6, 11, 7,         *u = "Raptor Cove",                            *f = "Golden Cove",    *p = "Intel 7"); // LX*, DPTF*
+   FM  (    0, 6, 11,10,         *u = "Raptor Cove",                            *f = "Golden Cove",    *p = "Intel 7"); // DPTF*; Coreboot*
+   FM  (    0, 6, 11,14,         *u = "Golden Cove",                                                   *p = "Intel 7"); // Coreboot*
    F   (    0, 7,                *u = "Itanium");
    FM  (    0,11,  0, 0,         *u = "Knights Ferry",             *ciu = TRUE, *f = "K1OM",           *p = "45nm"); // found only on en.wikichip.org
    FM  (    0,11,  0, 1,         *u = "Knights Corner",            *ciu = TRUE, *f = "K1OM",           *p = "22nm");
@@ -2217,9 +2295,27 @@ decode_uarch_amd(unsigned int  val,
    FM  ( 8,15,  1, 8,         *u = "Zen+",        *p = "12nm");
    FM  ( 8,15,  2, 0,         *u = "Zen",         *p = "14nm");
    FM  ( 8,15,  3, 1,         *u = "Zen 2",       *p = "7nm");  // found only on en.wikichip.org
+   FM  ( 8,15,  4, 7,         *u = "Zen 2",       *p = "7nm");  // only instlatx64 example; engr sample?
    FM  ( 8,15,  6, 0,         *u = "Zen 2",       *p = "7nm");
+   FM  ( 8,15,  6, 8,         *u = "Zen 2",       *p = "7nm");  // undocumented, but instlatx64 samples
    FM  ( 8,15,  7, 1,         *u = "Zen 2",       *p = "7nm");  // undocumented, but samples from Steven Noonan
-   F   (10,15,                *u = "Zen 3",       *p = "7nm");  // undocumented, LX*
+   FM  ( 8,15,  9, 0,         *u = "Zen 2",       *p = "7nm");  // undocumented, but sample via instlatx64 from @patrickschur_
+   FM  ( 8,15,  9, 8,         *u = "Zen 2",       *p = "7nm");  // undocumented, but sample via instlatx64 from @zimogorets
+   FM  ( 8,15, 10, 0,         *u = "Zen 2",       *p = "7nm");  // undocumented, but sample via instlatx64 from @ExecuFix
+   FM  (10,15,  0, 1,         *u = "Zen 3",       *p = "7nm");
+   FM  (10,15,  0, 8,         *u = "Zen 3",       *p = "7nm");  // undocumented, but sample via instlatx64 from @ExecuFix
+   FM  (10,15,  1, 0,         *u = "Zen 4",       *p = "5nm");  // undocumented, but sample via instlatx64 from @ExecuFix
+   FM  (10,15,  1, 8,         *u = "Zen 4",       *p = "5nm");  // undocumented, but sample via instlatx64 from @patrickschur_
+   FM  (10,15,  2, 1,         *u = "Zen 3",       *p = "7nm");
+   FM  (10,15,  3, 0,         *u = "Zen 3",       *p = "7nm");  // undocumented, but sample via instlatx64 from @patrickschur_
+   FM  (10,15,  4, 0,         *u = "Zen 3",       *p = "7nm");  // undocumented, but sample via instlatx64 from @patrickschur_
+   FM  (10,15,  4, 4,         *u = "Zen 3",       *p = "7nm");  // undocumented, but instlatx64 sample
+   FM  (10,15,  5, 0,         *u = "Zen 3",       *p = "7nm");  // undocumented, but instlatx64 samples
+   FM  (10,15,  5, 1,         *u = "Zen 3",       *p = "7nm");
+   FM  (10,15,  6, 0,         *u = "Zen 4",       *p = "5nm");  // undocumented, but sample via instlatx64 from @patrickschur_
+   FM  (10,15,  6, 1,         *u = "Zen 4",       *p = "5nm");  // undocumented, but instlatx64 sample
+   FM  (10,15,  7, 0,         *u = "Zen 4",       *p = "5nm");  // undocumented, but sample via instlatx64 from @patrickschur_
+   FM  (10,15, 10, 0,         *u = "Zen 4c",      *p = "5nm");  // undocumented, but sample via instlatx64 from @ExecuFix; 4c from 2021-11-8 roadmap from Lisa Su
    DEFAULT                  ((void)NULL);
 }
 
@@ -2259,7 +2355,12 @@ decode_uarch_via(unsigned int         val,
    FM  (0, 6,  0,13,         *u = "C7",                       *p = "90nm");
    FMSQ(0, 6,  0,15, 14, vZ, *u = "ZhangJiang",               *p = "28nm");
    FM  (0, 6,  0,15,         *u = "C7");                      // *p depends on core
-   FM  (0, 7,  0,11,         *u = "ZhangJiang",               *p = "28nm");
+   FMQ (0, 6,  1, 9,     vZ, *u = "ZhangJiang",               *p = "28nm"); // Google_cpu_features*
+   FM  (0, 6,  4, 7,         *u = "CNS",                      *p = "16nm");
+   FM  (0, 7,  0,11,         *u = "WuDaoKou",                 *p = "28nm");
+   FM  (0, 7,  1,11,         *u = "WuDaoKou",                 *p = "28nm"); // Google_cpu_features*
+   FM  (0, 7,  3,11,         *u = "LuJiaZui",                 *p = "16nm"); // Google_cpu_features*
+   FM  (0, 7,  5,11,         *u = "YongFeng",                 *p = "7nm");  // Google_cpu_features* (speculative?)
    DEFAULT                  ((void)NULL);
 }
 
@@ -2375,7 +2476,7 @@ decode_uarch(unsigned int         val,
    
    switch (vendor) {
    case VENDOR_INTEL:
-      decode_uarch_intel(val, arch);
+      decode_uarch_intel(val, arch, stash);
       break;
    case VENDOR_AMD:
       decode_uarch_amd(val, arch);
@@ -2440,13 +2541,14 @@ print_uarch(const code_stash_t*  stash)
 }
 
 static cstring
-append_uarch(ccstring      synth,
-             unsigned int  val,
-             vendor_t      vendor)
+append_uarch(ccstring             synth,
+             unsigned int         val,
+             vendor_t             vendor,
+             const code_stash_t*  stash)
 {
    if (synth != NULL) {
       arch_t  arch;
-      decode_uarch(val, vendor, NULL, &arch);
+      decode_uarch(val, vendor, stash, &arch);
       if ((arch.uarch != NULL && !arch.core_is_uarch)
           || arch.family != NULL
           || arch.phys != NULL) {
@@ -2605,6 +2707,8 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FMS (    0, 5,  0, 2, 11,     "Intel Pentium P54C 75 - 200 (cB1)");
    FMS (    0, 5,  0, 2, 12,     "Intel Pentium P54C 75 - 200 (cC0)");
    FM  (    0, 5,  0, 2,         "Intel Pentium P54C 75 - 200");
+   // An instlatx64 sample claims stepping 2 is C0.
+   TFMS(1,  0, 5,  0, 3,  2,     "Intel Pentium OverDrive for i486 (P24T C0)"); // no docs
    TFM (1,  0, 5,  0, 3,         "Intel Pentium OverDrive for i486 (P24T)"); // no docs
    // Intel docs (242480).
    TFM (1,  0, 5,  0, 4,         "Intel Pentium OverDrive for P54C");
@@ -3101,6 +3205,14 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FM  (    0, 6,  4, 5,         "Intel Core (unknown type) (Haswell-ULT)");
    // Intel docs (328899,328903) omit the stepping numbers for (0,6),(4,6) C0 & D0.
    // MRG* mentions (0,6),(4,6),1, but doesn't specify which stepping name it is.
+   // An instlatx64 sample claims stepping 1 is C1.
+   FMSQ(    0, 6,  4, 6,  1, Mc, "Intel Mobile Core i*-4000Y (Mobile H) (Crystal Well C1)");
+   FMSQ(    0, 6,  4, 6,  1, dc, "Intel Core i*-4000 / Mobile Core i*-4000 (Desktop R) (Crystal Well C1)");
+   FMSQ(    0, 6,  4, 6,  1, MP, "Intel Mobile Pentium 3500U / 3600U / 3500Y (Mobile H) (Crystal Well C1)");
+   FMSQ(    0, 6,  4, 6,  1, dC, "Intel Celeron G1800 (Desktop R) (Crystal Well C1)");
+   FMSQ(    0, 6,  4, 6,  1, MC, "Intel Mobile Celeron 2900U (Mobile H) (Crystal Well C1)");
+   FMSQ(    0, 6,  4, 6,  1, dP, "Intel Pentium G3000 (Desktop R) (Crystal Well C1)");
+   FMS (    0, 6,  4, 6,  1,     "Intel Core (unknown type) (Crystal Well C1)");
    FMQ (    0, 6,  4, 6,     Mc, "Intel Mobile Core i*-4000Y (Mobile H) (Crystal Well)");
    FMQ (    0, 6,  4, 6,     dc, "Intel Core i*-4000 / Mobile Core i*-4000 (Desktop R) (Crystal Well)");
    FMQ (    0, 6,  4, 6,     MP, "Intel Mobile Pentium 3500U / 3600U / 3500Y (Mobile H) (Crystal Well)");
@@ -3176,11 +3288,15 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    // MRG* 2019-11-13 mentions stepping 3, but doesn't mention stepping name.
    // geekbench.com has an "Intel Xeon Gold 6230" example of a stepping 5, but
    // no stepping name.
+   // Intel's "Retpoline: A Branch Target Injection Mitigation" mentions
+   // steppings 11 & 12, but no stepping names (or even
+   // Skylake/Cascade Lake/Cooper Lake differentiation).
    FMSQ(    0, 6,  5, 5,  2, sS, "Intel Scalable Bronze/Silver/Gold/Platinum (Skylake B0/L0)");
    FMSQ(    0, 6,  5, 5,  2, sX, "Intel Xeon W 2000 / D-2100 (Skylake B0/L0)");
    FMSQ(    0, 6,  5, 5,  4, sS, "Intel Scalable Bronze/Silver/Gold/Platinum (Skylake H0/M0/U0)");
    FMSQ(    0, 6,  5, 5,  4, sX, "Intel Xeon W 2000 / D-2100 (Skylake H0/M0/U0)"); // D-2100 from MRG* 2018-03-06
    FMSQ(    0, 6,  5, 5,  4, dc, "Intel Core i9-7000X (Skylake-X H0/M0/U0)"); // only from MRG* 2018-03-06
+   FMSQ(    0, 6,  5, 5,  4, iM, "Montage Jintide Gen1"); // undocumented; only instlatx64 example
    FMSQ(    0, 6,  5, 5,  6, sS, "Intel Scalable (2nd Gen) Bronze/Silver/Gold/Platinum (Cascade Lake)"); // no docs, but example from Greg Stewart
    FMSQ(    0, 6,  5, 5,  6, sX, "Intel Xeon W 2000 (Cascade Lake)"); // no docs, but example from Greg Stewart
    FMSQ(    0, 6,  5, 5,  7, dc, "Intel Core i*-10000X (Cascade Lake-X B1/L1/R1)"); // no docs, but instlatx64 example
@@ -3235,7 +3351,7 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FMSQ(    0, 6,  5,14,  3, dC, "Intel Celeron G3900 (Skylake-H R0)");
    FMSQ(    0, 6,  5,14,  3, sX, "Intel Xeon E3-1200 / E3-1500 v5 (Skylake-H R0)"); // E3-1500 only from MRG 2019-08-31
    FMS (    0, 6,  5,14,  3,     "Intel Core (unknown type) (Skylake-H R0)");
-   FMS (    0, 6,  4,14,  8,     "Intel Core (unknown type) (Kaby Lake-H A0)"); // Coreboot*
+   FMS (    0, 6,  5,14,  8,     "Intel Core (unknown type) (Kaby Lake-H A0)"); // Coreboot*
    FMQ (    0, 6,  5,14,     dc, "Intel Core i*-6000 (Skylake-H)");
    FMQ (    0, 6,  5,14,     dP, "Intel Pentium G4000 (Skylake-H)");
    FMQ (    0, 6,  5,14,     dC, "Intel Celeron G3900 (Skylake-H)");
@@ -3253,11 +3369,14 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FMS (    0, 6,  6, 6,  2,     "Intel Core (Cannon Lake C0)");
    FMS (    0, 6,  6, 6,  3,     "Intel Core (Cannon Lake D0)");
    FM  (    0, 6,  6, 6,         "Intel Core (Cannon Lake)");
-   FM  (    0, 6,  6,10,         "Intel Core (Ice Lake)"); // no spec update; only MSR_CPUID_table* so far
-   FM  (    0, 6,  6,12,         "Intel Core (Ice Lake)"); // no spec update; only MSR_CPUID_table* so far
+   FM  (    0, 6,  6, 7,         "Intel Core (Cannon Lake)"); // DPTF*
+   FMSQ(    0, 6,  6,10,  6, sS, "Intel Scalable (3rd Gen) Bronze/Silver/Gold/Platinum (Ice Lake D2/M1)");
+   FMQ (    0, 6,  6,10,     sS, "Intel Scalable (3rd Gen) Bronze/Silver/Gold/Platinum (Ice Lake)");
+   FM  (    0, 6,  6,10,         "Intel (unknown type) (Ice Lake)");
+   FM  (    0, 6,  6,12,         "Intel Core (Ice Lake)"); // no spec update; only MSR_CPUID_table* so far; DPTF* claims this is Meteor Lake S.
    // No spec update; only MRG* 2018-03-06, 2019-08-31.  It is some sort of Atom,
    // but no idea which uarch or core.
-   FM  (    0, 6,  6,14,         "Intel Puma 7");
+   FM  (    0, 6,  6,14,         "Intel Puma 7 (Cougar Mountain)");
    // No spec update; only instlatx64 example.
    FM  (    0, 6,  7, 5,         "Intel Spreadtrum SC9853I-IA");
    // Intel docs (336562).
@@ -3280,28 +3399,45 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    // numbers for (0,6),(7,14), and it contradicts actual samples, so I'm
    // ignoring it.
    // Currently there are no Ice Lake CPUs for Xeon/Pentium/Celeron.
-   // Coreboot* provides steppings 0 (A0) & 1 (B0), but not for stepping 5,
-   // seen in an instlatx64 sample.
+   // Coreboot* provides steppings 0 (A0) & 1 (B0), but not for stepping 5.
+   // An instlatx64 sample has stepping 5 and claims the name is D1.
    FMS (    0, 6,  7,14,  0,     "Intel Core i*-10000 (Ice Lake-U/Y A0)");
    FMS (    0, 6,  7,14,  1,     "Intel Core i*-10000 (Ice Lake-U/Y B0)");
+   FMS (    0, 6,  7,14,  5,     "Intel Core i*-10000 (Ice Lake-U/Y D1)");
    FM  (    0, 6,  7,14,         "Intel Core i*-10000 (Ice Lake-U/Y)");
    // no spec update; only MSR_CPUID_table* so far
    // MRG* 2018-03-06 mentions stepping 0, but doesn't specify which stepping name it is.
    FM  (    0, 6,  8, 5,         "Intel Xeon Phi (Knights Mill)");
-   FM  (    0, 6,  8, 6,         "Intel Atom (Elkhart Lake)");
+   // no spec update; only MSR_CPUID_table* & SSG* so far.
+   // SSG* provides the 4,5,7 steppings.
+   FMS (    0, 6,  8, 6,  4,     "Intel Atom P5900 (Snow Ridge)");
+   FMS (    0, 6,  8, 6,  5,     "Intel Atom P5900 (Snow Ridge)");
+   FMS (    0, 6,  8, 6,  7,     "Intel Atom P5300 / P5700 (Snow Ridge) / C5000 (Parker Ridge)");
+   FM  (    0, 6,  8, 6,         "Intel Atom (Snow Ridge/Parker Ridge)");
+   // instlatx64 sample has stepping 1, but has no name.
+   // SSG* 2022 also mentions it, but does so ambiguously.
    FM  (    0, 6,  8,10,         "Intel Atom (Lakefield)"); // no spec update; LX*
    // Coreboot* provides steppings.
    FMS (    0, 6,  8,12,  0,     "Intel Core (Tiger Lake-U A0)");
-   FMS (    0, 6,  8,12,  1,     "Intel Core (Tiger Lake-U B0)");
-   FM  (    0, 6,  8,12,         "Intel Core (Tiger Lake-U)");
-   FM  (    0, 6,  8,13,         "Intel Core (Tiger Lake)"); // LX*
+   FMSQ(    0, 6,  8,12,  1, dC, "Intel Celeron 6000 (Tiger Lake-U B0)");
+   FMSQ(    0, 6,  8,12,  1, dP, "Intel Pentium Gold 7505 (Tiger Lake-U B0)");
+   FMSQ(    0, 6,  8,12,  1, dc, "Intel Core i*-11000 / i*-1100G* (Tiger Lake-U B0)");
+   FMS (    0, 6,  8,12,  1,     "Intel (unknown type) (Tiger Lake-U B0)");
+   FMQ (    0, 6,  8,12,     dC, "Intel Celeron (Tiger Lake-U)");
+   FMQ (    0, 6,  8,12,     dP, "Intel Pentium (Tiger Lake-U)");
+   FMQ (    0, 6,  8,12,     dc, "Intel Core (Tiger Lake-U)");
+   FM  (    0, 6,  8,12,         "Intel (unknown type) (Tiger Lake-U)");
+   // no spec update; only MSR_CPUID_table* and SSG* so far.  SSG* provides H suffix.
+   // Coreboot* provides stepping.
+   FMS (    0, 6,  8,13,  1,     "Intel Core (Tiger Lake-H R0)");
+   FM  (    0, 6,  8,13,         "Intel Core (Tiger Lake-H)");
    // Intel docs (334663) omit the stepping numbers for (0,6),(8,14)
    // H0, J1 & Y0, but (338025, 615213) provide some.
    // Coreboot* provides the 9 (H0) & 10 (Y0) stepping, but not J1.
    FMSQ(    0, 6,  8,14,  9, UC, "Intel Celeron 3x65U (Kaby Lake H0)"); // MRG* 2019-08-31 pinned down stepping
    FMSQ(    0, 6,  8,14,  9, UP, "Intel Celeron 4415U (Kaby Lake H0)"); // MRG* 2019-08-31 pinned down stepping
    FMSQ(    0, 6,  8,14,  9, YC, "Intel Celeron 3x65Y (Kaby Lake H0)"); // MRG* 2019-08-31 pinned down stepping
-   FMSQ(    0, 6,  8,14,  9, YP, "Intel Celeron 4410Y (Kaby Lake H0)"); // MRG* 2019-08-31 pinned down stepping
+   FMSQ(    0, 6,  8,14,  9, YP, "Intel Pentium / Celeron 4400Y (Kaby Lake H0)"); // MRG* 2019-08-31 pinned down stepping
    FMSQ(    0, 6,  8,14,  9, Y8, "Intel i*-8000Y / m*-8000Y (Amber Lake-Y H0)"); // no spec update; only MRG* 2019-08-31 & instlatx64 examples
    FMSQ(    0, 6,  8,14,  9, LY, "Intel Core i*-7000Y (Kaby Lake H0)"); // no spec update; only MRG* 2019-08-31 & instlatx64 examples
    FMSQ(    0, 6,  8,14,  9, dc, "Intel Core i*-7000U (Kaby Lake H0)"); // no docs on stepping; MRG* 2018-03-06, 2019-08-31
@@ -3318,20 +3454,59 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FMSQ(    0, 6,  8,14, 12, dC, "Intel Celeron 5000U (Comet Lake-U V1)"); // MRG* 2019-08-31 pinned down stepping
    FMS (    0, 6,  8,14, 12,     "Intel (unknown type) (Whiskey Lake-U V0 / Comet Lake-U V1)");
    FM  (    0, 6,  8,14,         "Intel Core (unknown type) (Kaby Lake / Amber Lake-Y / Whiskey Lake-U / Comet Lake-U)");
-   FM  (    0, 6,  8,15,         "Intel Xeon (unknown type) (Sapphire Rapids)"); // LX*
+   FM  (    0, 6,  8,15,         "Intel Xeon (unknown type) (Sapphire Rapids)"); // MSR_CPUID_table*, LX*
    // LX*.  Coreboot* provides stepping.
-   FMS (    0, 6,  9, 6,  0,     "Intel Atom (Elkhart Lake A0)");
-   FMS (    0, 6,  9, 6,  1,     "Intel Atom (Elkhart Lake B0)");
-   FM  (    0, 6,  9, 6,         "Intel Atom (Elkhart Lake)");
+   FMSQ(    0, 6,  9, 6,  0, dC, "Intel Celeron J6400 / N6400 (Elkhart Lake A0)");
+   FMSQ(    0, 6,  9, 6,  0, dP, "Intel Pentium J6400 / N6400 (Elkhart Lake A0)");
+   FMSQ(    0, 6,  9, 6,  0, da, "Intel Atom (Elkhart Lake A0)");
+   FMS (    0, 6,  9, 6,  0,     "Intel (unknown type) (Elkhart Lake A0)");
+   FMSQ(    0, 6,  9, 6,  1, dC, "Intel Celeron J6400 / N6400 (Elkhart Lake B0/B1)");
+   FMSQ(    0, 6,  9, 6,  1, dP, "Intel Pentium J6400 / N6400 (Elkhart Lake B0/B1)");
+   FMSQ(    0, 6,  9, 6,  1, da, "Intel Atom (Elkhart Lake B0/B1)");
+   FMS (    0, 6,  9, 6,  1,     "Intel (unknown type) (Elkhart Lake B0/B1)");
+   FMQ (    0, 6,  9, 6,     dC, "Intel Celeron (Elkhart Lake)");
+   FMQ (    0, 6,  9, 6,     dP, "Intel Pentium (Elkhart Lake)");
+   FMQ (    0, 6,  9, 6,     da, "Intel Atom (Elkhart Lake)");
+   FM  (    0, 6,  9, 6,         "Intel (unknown type) (Elkhart Lake)");
+   // Intel docs (682436) mention Core stepping values 2, 5, 3, 4; but omit stepping names.
+   // Coreboot* provides A0, B0, C0, G0, H0 steppings (notably not 3).
+   // Stepping for 4 is dubious because 682436 says Alder Lake-U,
+   // whereas Coreboot* says Alder Lake-S G0.
+   // instlatx64 sample claims stepping 2 is C0.
+   FMSQ(    0, 6,  9, 7,  0, dc, "Intel Core i*-12000 (Alder Lake-S A0)");
+   FMS (    0, 6,  9, 7,  0,     "Intel (unknown type) (Alder Lake-S A0)");
+   FMSQ(    0, 6,  9, 7,  1, dc, "Intel Core i*-12000 (Alder Lake-S B0)");
+   FMS (    0, 6,  9, 7,  1,     "Intel (unknown type) (Alder Lake-S B0)");
+   FMSQ(    0, 6,  9, 7,  2, dc, "Intel Core i*-12000 (Alder Lake-S/HX C0)");
+   FMS (    0, 6,  9, 7,  2,     "Intel (unknown type) (Alder Lake-S/HX C0)");
+   FMSQ(    0, 6,  9, 7,  3, dc, "Intel Core i*-12000 / i*-1200P (Alder Lake-P/H)");
+   FMS (    0, 6,  9, 7,  3,     "Intel (unknown type) (Alder Lake-P/H)");
+   FMSQ(    0, 6,  9, 7,  4, dc, "Intel Core i*-1200U (Alder Lake-U G0)");
+   FMS (    0, 6,  9, 7,  4,     "Intel (unknown type) (Alder Lake-U G0)");
+   FMSQ(    0, 6,  9, 7,  5, dc, "Intel Core i*-12000 (Alder Lake-S H0)");
+   FMS (    0, 6,  9, 7,  5,     "Intel (unknown type) (Alder Lake-S H0)");
+   FMQ (    0, 6,  9, 7,     dc, "Intel Core i*-12000 (Alder Lake-S/P/H/U)");
+   FM  (    0, 6,  9, 7,         "Intel (unknown type) (Alder Lake-S/P/H/U)");
+   // MSR_CPUID_table*, Coreboot*.  Coreboot* provides steppings.
+   FMSQ(    0, 6,  9,10,  0, dc, "Intel Core (Alder Lake J0)");
+   FMS (    0, 6,  9,10,  0,     "Intel (unknown type) (Alder Lake J0)");
+   FMSQ(    0, 6,  9,10,  1, dc, "Intel Core (Alder Lake Q0)");
+   FMS (    0, 6,  9,10,  1,     "Intel (unknown type) (Alder Lake Q0)");
+   FMSQ(    0, 6,  9,10,  2, dc, "Intel Core (Alder Lake K0)");
+   FMS (    0, 6,  9,10,  2,     "Intel (unknown type) (Alder Lake K0)");
+   FMSQ(    0, 6,  9,10,  3, dc, "Intel Core (Alder Lake L0)");
+   FMS (    0, 6,  9,10,  3,     "Intel (unknown type) (Alder Lake L0)");
+   FMSQ(    0, 6,  9,10,  4, dc, "Intel Core (Alder Lake R0)");
+   FMS (    0, 6,  9,10,  4,     "Intel (unknown type) (Alder Lake R0)");
+   FMQ (    0, 6,  9,10,     dc, "Intel Core (Alder Lake)");
+   FM  (    0, 6,  9,10,         "Intel (unknown type) (Alder Lake)");
    // LX*.  Coreboot* provides stepping.
-   FMS (    0, 6,  9, 7,  0,     "Intel Atom (Alder Lake-S A0)");
-   FM  (    0, 6,  9, 7,         "Intel Atom (Alder Lake-S)");
-   // Coreboot*.  Coreboot* provides stepping.
-   FMS (    0, 6,  9,10,  0,     "Intel Atom (Alder Lake-P A0)");
-   FM  (    0, 6,  9,10,         "Intel Atom (Alder Lake-P)");
-   // LX*.  Coreboot* provides stepping.
-   FMS (    0, 6,  9,12,  0,     "Intel Atom (Jasper Lake A0)");
-   FM  (    0, 6,  9,12,         "Intel Atom (Jasper Lake)");
+   FMSQ(    0, 6,  9,12,  0, dC, "Intel Celeron N4500 / N5100 (Jasper Lake A0)");
+   FMSQ(    0, 6,  9,12,  0, dP, "Intel Pentium N6000 (Jasper Lake A0)");
+   FMS (    0, 6,  9,12,  0,     "Intel (unknown type) (Jasper Lake A0)");
+   FMQ (    0, 6,  9,12,     dC, "Intel Celeron N4500 / N5100 (Jasper Lake)");
+   FMQ (    0, 6,  9,12,     dP, "Intel Pentium N6000 (Jasper Lake)");
+   FM  (    0, 6,  9,12,         "Intel (unknown type) (Jasper Lake)");
    FM  (    0, 6,  9,13,         "Intel NNP I-1000 (Spring Hill)"); // LX*
    // Intel docs (334663, 335718, 336466, 338014) omit the stepping numbers for
    // (0,6),(9,14) B0, but (337346) provides some.
@@ -3342,6 +3517,7 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FMSQ(    0, 6,  9,14,  9, sX, "Intel Xeon E3-1200 v6 (Kaby Lake-H B0)"); // no docs on stepping; only MRG* 2018-03-06
    FMSQ(    0, 6,  9,14,  9, dC, "Intel Celeron G3930 (Kaby Lake-H B0)"); // MRG* 2020-01-27 pinned down stepping
    FMSQ(    0, 6,  9,14, 10, LU, "Intel Core i*-8000 U Line (Coffee Lake D0)");
+   FMSQ(    0, 6,  9,14, 10, dP, "Intel Pentium Gold G5000 (Coffee Lake U0)"); // no docs; only Andrey Rahmatullin sample
    FMSQ(    0, 6,  9,14, 10, dc, "Intel Core i*-8000 S/H Line (Coffee Lake U0)");
    FMSQ(    0, 6,  9,14, 10, sX, "Intel Xeon E-2100 (Coffee Lake U0)"); // MRG* 2019-08-31
    FMSQ(    0, 6,  9,14, 11, dc, "Intel Core i*-8000 S Line (Coffee Lake B0)");
@@ -3352,23 +3528,45 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FMSQ(    0, 6,  9,14, 13, dc, "Intel Core i*-9000 H Line (Coffee Lake R0)");
    FMSQ(    0, 6,  9,14, 13, sX, "Intel Xeon E-2200 (Coffee Lake R0)"); // no docs on stepping; only MRG 2019-11-13
    FM  (    0, 6,  9,14,         "Intel (unknown type) (Kaby Lake / Coffee Lake)");
+   FM  (    0, 6,  9,15,         "Intel (unknown type) (Ice Lake)"); // undocumented, but (engr?) sample via instlatx64 from Komachi_ENSAKA
    // LX*.  Coreboot* provides more detail & steppings
    // (615213) mentions the (0,6),(10,5),2 and (0,6),(10,5),5 steppings, but
    // does not provide their names.
    // en.wikichip.org provides more details on stepping names.
+   FMSQ(    0, 6, 10, 5,  0, dC, "Intel Celeron 5000 (Comet Lake-H/S G0)");
+   FMSQ(    0, 6, 10, 5,  0, dP, "Intel Pentium Gold G6400 / G6500 (Comet Lake-H/S G0)");
    FMSQ(    0, 6, 10, 5,  0, dc, "Intel Core i*-10000 (Comet Lake-H/S G0)");
+   FMSQ(    0, 6, 10, 5,  0, sX, "Intel Xeon W-1200 (Comet Lake-H/S G0)");
    FMS (    0, 6, 10, 5,  0,     "Intel (unknown type) (Comet Lake-H/S G0)");
+   FMSQ(    0, 6, 10, 5,  1, dC, "Intel Celeron 5000 (Comet Lake-H/S P0)");
+   FMSQ(    0, 6, 10, 5,  1, dP, "Intel Pentium Gold G6400 / G6500 (Comet Lake-H/S P0)");
    FMSQ(    0, 6, 10, 5,  1, dc, "Intel Core i*-10000 (Comet Lake-H/S P0)");
+   FMSQ(    0, 6, 10, 5,  1, sX, "Intel Xeon W-1200 (Comet Lake-H/S P0)");
    FMS (    0, 6, 10, 5,  1,     "Intel (unknown type) (Comet Lake-H/S P0)");
+   FMSQ(    0, 6, 10, 5,  2, dC, "Intel Celeron 5000 (Comet Lake-H/S R1)");
+   FMSQ(    0, 6, 10, 5,  2, dP, "Intel Pentium Gold G6400 / G6500 (Comet Lake-H/S R1)");
    FMSQ(    0, 6, 10, 5,  2, dc, "Intel Core i*-10000 (Comet Lake-H/S R1)");
+   FMSQ(    0, 6, 10, 5,  2, sX, "Intel Xeon W-1200 (Comet Lake-H/S R1)");
    FMS (    0, 6, 10, 5,  2,     "Intel (unknown type) (Comet Lake-H/S R1)");
+   FMSQ(    0, 6, 10, 5,  3, dC, "Intel Celeron 5000 (Comet Lake-H/S G1)");
+   FMSQ(    0, 6, 10, 5,  3, dP, "Intel Pentium Gold G6400 / G6500 (Comet Lake-H/S G1)");
    FMSQ(    0, 6, 10, 5,  3, dc, "Intel Core i*-10000 (Comet Lake-H/S G1)");
+   FMSQ(    0, 6, 10, 5,  3, sX, "Intel Xeon W-1200 (Comet Lake-H/S G1)");
    FMS (    0, 6, 10, 5,  3,     "Intel (unknown type) (Comet Lake-H/S G1)");
+   FMSQ(    0, 6, 10, 5,  4, dC, "Intel Celeron 5000 (Comet Lake-H/S P1)");
+   FMSQ(    0, 6, 10, 5,  4, dP, "Intel Pentium Gold G6400 / G6500 (Comet Lake-H/S P1)");
    FMSQ(    0, 6, 10, 5,  4, dc, "Intel Core i*-10000 (Comet Lake-H/S P1)");
+   FMSQ(    0, 6, 10, 5,  4, sX, "Intel Xeon W-1200 (Comet Lake-H/S P1)");
    FMS (    0, 6, 10, 5,  4,     "Intel (unknown type) (Comet Lake-H/S P1)");
+   FMSQ(    0, 6, 10, 5,  5, dC, "Intel Celeron 5000 (Comet Lake-H/S Q0)");
+   FMSQ(    0, 6, 10, 5,  5, dP, "Intel Pentium Gold G6400 / G6500 (Comet Lake-H/S Q0)");
    FMSQ(    0, 6, 10, 5,  5, dc, "Intel Core i*-10000 (Comet Lake-H/S Q0)");
+   FMSQ(    0, 6, 10, 5,  5, sX, "Intel Xeon W-1200 (Comet Lake-H/S Q0)");
    FMS (    0, 6, 10, 5,  5,     "Intel (unknown type) (Comet Lake-H/S Q0)");
+   FMQ (    0, 6, 10, 5,     dC, "Intel Celeron 5000 (Comet Lake-H/S)");
+   FMQ (    0, 6, 10, 5,     dP, "Intel Pentium Gold G6400 / G6500 (Comet Lake-H/S)");
    FMQ (    0, 6, 10, 5,     dc, "Intel Core i*-10000 (Comet Lake-H/S)");
+   FMQ (    0, 6, 10, 5,     sX, "Intel Xeon W-1200 (Comet Lake-H/S)");
    FM  (    0, 6, 10, 5,         "Intel (unknown type) (Comet Lake-H/S)");
    // (615213) provides steppings.
    // MRG* 2019-11-13 & instlatx64 example
@@ -3379,7 +3577,31 @@ decode_synth_intel(unsigned int         val,  /* val_1_eax */
    FMS (    0, 6, 10, 6,  3,     "Intel Core i*-10000 (Comet Lake-S G1)");
    FMS (    0, 6, 10, 6,  5,     "Intel Core i*-10000 (Comet Lake-S Q0)");
    FM  (    0, 6, 10, 6,         "Intel Core i*-10000 (Comet Lake)");
+   // instlatx64 sample claims stepping 1 is B0.
+   FMSQ(    0, 6, 10, 7,  1, dc, "Intel Core i*-11000 (Rocket Lake B0)");
+   FMSQ(    0, 6, 10, 7,  1, sX, "Intel Xeon E-1300 / E-2300G (Rocket Lake B0)");
+   FMS (    0, 6, 10, 7,  1,     "Intel (unknown type) (Rocket Lake B0)");
+   FMQ (    0, 6, 10, 7,     dc, "Intel Core i*-11000 (Rocket Lake)");
+   FMQ (    0, 6, 10, 7,     sX, "Intel Xeon E-1300 / E-2300G (Rocket Lake)");
    FM  (    0, 6, 10, 7,         "Intel (unknown type) (Rocket Lake)");
+   FM  (    0, 6, 10, 8,         "Intel (unknown type) (Rocket Lake)"); // MSR_CPUID_table*
+   FMS (    0, 6, 10,10,  0,     "Intel (unknown type) (Meteor Lake-M A0)"); // DPTF*; undocumented, but (engr?) sample via instlatx64 from Komachi_ENSAKA; Coreboot* provides steppings.
+   FMS (    0, 6, 10,10,  1,     "Intel (unknown type) (Meteor Lake-M A0)"); // DPTF*; undocumented, but (engr?) sample via instlatx64 from Komachi_ENSAKA; Coreboot* provides steppings.
+   FM  (    0, 6, 10,10,         "Intel (unknown type) (Meteor Lake-M)"); // MSR_CPUID_table*; DPTF*, LX* (but -L); (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10,11,         "Intel (unknown type) (Meteor Lake-N)"); // DPTF*
+   FM  (    0, 6, 10,12,         "Intel (unknown type) (Meteor Lake-S)"); // MSR_CPUID_table*; LX*; (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10,13,         "Intel (unknown type) (Granite Rapids)"); // MSR_CPUID_table*; (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 10,14,         "Intel (unknown type) (Granite Rapids)"); // MSR_CPUID_table*
+   FM  (    0, 6, 10,15,         "Intel (unknown type) (Sierra Forest)"); // MSR_CPUID_table*; (engr?) sample via instlatx64 from Komachi_ENSAKA
+   FM  (    0, 6, 11, 5,         "Intel (unknown type) (Meteor Lake)"); // MSR_CPUID_table*
+   FM  (    0, 6, 11, 6,         "Intel Atom (Grand Ridge)"); // MSR_CPUID_table*
+   FM  (    0, 6, 11, 7,         "Intel (unknown type) (Raptor Lake)"); // MSR_CPUID_table*; LX*; DPTF* (which also says Raptor Lake-S)
+   FMS (    0, 6, 11,10,  2,     "Intel (unknown type) (Raptor Lake-P J0)"); // Coreboot*
+   FMS (    0, 6, 11,10,  3,     "Intel (unknown type) (Raptor Lake-P Q0)"); // Coreboot*
+   FM  (    0, 6, 11,10,         "Intel (unknown type) (Raptor Lake-P)"); // LX*; DPTF*; Coreboot*
+   FMS (    0, 6, 11,14,  0,     "Intel (unknown type) (Alder Lake-N A0)"); // Coreboot*
+   FM  (    0, 6, 11,14,         "Intel (unknown type) (Alder Lake-N)"); // Coreboot*, LX*
+   FM  (    0, 6, 11,15,         "Intel (unknown type) (Alder Lake)"); // MSR_CPUID_table* (or maybe Gracemont "little" cores tied to Alder Lake?); LX* thinks it's Raptor Lake-S
    FQ  (    0, 6,            sX, "Intel Xeon (unknown model)");
    FQ  (    0, 6,            se, "Intel Xeon (unknown model)");
    FQ  (    0, 6,            MC, "Intel Mobile Celeron (unknown model)");
@@ -3598,6 +3820,7 @@ decode_synth_amd(unsigned int         val,
    FM  ( 0, 5,  0,13,         "AMD K6-2+, K6-III+");
    F   ( 0, 5,                "AMD 5k86 / K6 / Geode (unknown model)");
    FM  ( 0, 6,  0, 1,         "AMD Athlon (Argon)");
+   FMS ( 0, 6,  0, 2,  2,     "AMD Athlon (K75 / Pluto / Orion A2)");
    FM  ( 0, 6,  0, 2,         "AMD Athlon (K75 / Pluto / Orion)");
    FMS ( 0, 6,  0, 3,  0,     "AMD Duron / mobile Duron (Spitfire A0)");
    FMS ( 0, 6,  0, 3,  1,     "AMD Duron / mobile Duron (Spitfire A2)");
@@ -4176,6 +4399,7 @@ decode_synth_amd(unsigned int         val,
    FMSQ( 6,15,  3, 0,  1, Sa, "AMD Elite Performance A-Series (Kaveri KV-A1)");
    FMSQ( 6,15,  3, 0,  1, Mr, "AMD Mobile R-Series (Kaveri KV-A1)");
    FMSQ( 6,15,  3, 0,  1, sO, "AMD Opteron X1200 / X2200 (Kaveri KV-A1)");
+   FMSQ( 6,15,  3, 0,  1, Sr, "AMD R-Series (Bald Eagle KV-A1)"); // undocumented, but instlatx64 example
    FMS ( 6,15,  3, 0,  1,     "AMD (unknown type) (Kaveri KV-A1)");
    FMQ ( 6,15,  3, 0,     Sa, "AMD Elite Performance A-Series (Kaveri)");
    FMQ ( 6,15,  3, 0,     Mr, "AMD Mobile R-Series (Kaveri)");
@@ -4246,49 +4470,120 @@ decode_synth_amd(unsigned int         val,
    // sandpile.org mentions (7,15),(6,0) Puma-esque "NL" cores
    // (with stepping 1 = A1), but I have no idea of any such code name.
    F   ( 7,15,                "AMD (unknown model)");
+   // Frequently (always?) in Zen-based CPUs, the stepping name (revision) is
+   // determinable mechanically: the low order 3 bits of the model, converted
+   // to alphabetic characters, 0=A, 1=B, 2=C, etc.; and the stepping number.
+   // This is mentioned in each of individual the Processor Programming
+   // Reference manuals under CPUID_FN00000001_EAX, so beware: it's possible
+   // any one manual could deviate.
    FMS ( 8,15,  0, 0,  1,     "AMD (unknown type) (Summit Ridge/Naples ZP-A1)"); // sandpile.org
-   FMSQ( 8,15,  0, 1,  0, EE, "AMD EPYC (Snowy Owl ZP-B0)");
-   FMSQ( 8,15,  0, 1,  0, sE, "AMD EPYC (Naples ZP-B0)");
-   FMSQ( 8,15,  0, 1,  0, dR, "AMD Ryzen (Summit Ridge ZP-B0)");
+   FMSQ( 8,15,  0, 1,  0, EE, "AMD EPYC (1st Gen) (Snowy Owl ZP-B0)");
+   FMSQ( 8,15,  0, 1,  0, sE, "AMD EPYC (1st Gen) (Naples ZP-B0)");
+   FMSQ( 8,15,  0, 1,  0, dH, "AMD Ryzen Threadripper 1000 (Whitehaven B0)");
+   FMSQ( 8,15,  0, 1,  0, dR, "AMD Ryzen 1000 (Summit Ridge ZP-B0)");
    FMS ( 8,15,  0, 1,  0,     "AMD (unknown type) (Summit Ridge/Naples ZP-B0)");
-   FMSQ( 8,15,  0, 1,  1, EE, "AMD EPYC (Snowy Owl ZP-B1)");
-   FMSQ( 8,15,  0, 1,  1, sE, "AMD EPYC (Naples ZP-B1)");
-   FMSQ( 8,15,  0, 1,  1, dR, "AMD Ryzen (Summit Ridge ZP-B1)");
+   FMSQ( 8,15,  0, 1,  1, EE, "AMD EPYC (1st Gen) (Snowy Owl ZP-B1)");
+   FMSQ( 8,15,  0, 1,  1, sE, "AMD EPYC (1st Gen) (Naples ZP-B1)");
+   FMSQ( 8,15,  0, 1,  1, dH, "AMD Ryzen Threadripper 1000 (Whitehaven B1)");
+   FMSQ( 8,15,  0, 1,  1, dR, "AMD Ryzen 1000 (Summit Ridge ZP-B1)");
    FMS ( 8,15,  0, 1,  1,     "AMD (unknown type) (Summit Ridge/Naples ZP-B1)");
-   FMSQ( 8,15,  0, 1,  2, EE, "AMD EPYC (Snowy Owl ZP-B2)");
-   FMSQ( 8,15,  0, 1,  2, sE, "AMD EPYC (Naples ZP-B2)");
-   FMSQ( 8,15,  0, 1,  2, dR, "AMD Ryzen (Summit Ridge ZP-B2)");
+   FMSQ( 8,15,  0, 1,  2, EE, "AMD EPYC (1st Gen) (Snowy Owl ZP-B2)");
+   FMSQ( 8,15,  0, 1,  2, sE, "AMD EPYC (1st Gen) (Naples ZP-B2)");
+   FMSQ( 8,15,  0, 1,  2, dH, "AMD Ryzen Threadripper 1000 (Whitehaven B2)");
+   FMSQ( 8,15,  0, 1,  2, dR, "AMD Ryzen 1000 (Summit Ridge ZP-B2)");
    FMS ( 8,15,  0, 1,  2,     "AMD (unknown type) (Summit Ridge/Naples ZP-B2)");
-   FMQ ( 8,15,  0, 1,     EE, "AMD EPYC (Snowy Owl)");
-   FMQ ( 8,15,  0, 1,     sE, "AMD EPYC (Naples)");
-   FMQ ( 8,15,  0, 1,     dR, "AMD Ryzen (Summit Ridge)");
+   FMQ ( 8,15,  0, 1,     EE, "AMD EPYC (1st Gen) (Snowy Owl)");
+   FMQ ( 8,15,  0, 1,     sE, "AMD EPYC (1st Gen) (Naples)");
+   FMQ ( 8,15,  0, 1,     dH, "AMD Ryzen Threadripper 1000 (Whitehaven)");
+   FMQ ( 8,15,  0, 1,     dR, "AMD Ryzen 1000 (Summit Ridge)");
    FM  ( 8,15,  0, 1,         "AMD (unknown type) (Summit Ridge/Naples)");
-   FMS ( 8,15,  0, 8,  2,     "AMD Ryzen (Pinnacle Ridge PiR-B2)");
-   FM  ( 8,15,  0, 8,         "AMD Ryzen (Pinnacle Ridge)");
-   FMS ( 8,15,  1, 0,  1,     "AMD Ryzen (unknown type) (Raven Ridge/Snowy Owl/Great Horned Owl/Banded Kestrel RV-A1)"); // found only on en.wikichip.org & instlatx64 examples; sandpile.org
-   FMSQ( 8,15,  1, 1,  0, ER, "AMD Ryzen Embedded (Great Horned Owl/Banded Kestrel RV-B0)"); // only instlatx64 example; stepping from usual pattern
-   FMSQ( 8,15,  1, 1,  0, AR, "AMD Ryzen (Raven Ridge RV-B0)"); // found only on en.wikichip.org & instlatx64 examples; stepping from usual pattern
-   FMS ( 8,15,  1, 1,  0,     "AMD Ryzen (unknown type) (Raven Ridge/Snowy Owl/Great Horned Owl/Banded Kestrel RV-B0)"); // found only on en.wikichip.org & instlatx64 examples; stepping from usual pattern
-   FMQ ( 8,15,  1, 1,     ER, "AMD Ryzen Embedded (Great Horned Owl/Banded Kestrel)"); // only instlatx64 example
-   FMQ ( 8,15,  1, 1,     AR, "AMD Ryzen (Raven Ridge)"); // found only on en.wikichip.org & instlatx64 examples
-   FM  ( 8,15,  1, 1,         "AMD Ryzen (unknown type) (Raven Ridge/Snowy Owl/Great Horned Owl/Banded Kestrel)"); // found only on en.wikichip.org & instlatx64 examples
-   FMS ( 8,15,  1, 8,  1,     "AMD Ryzen (Picasso A1)");
-   FM  ( 8,15,  1, 8,         "AMD Ryzen (Picasso)");
-   FMS ( 8,15,  2, 0,  1,     "AMD Ryzen (Dali A1)");
-   FM  ( 8,15,  2, 0,         "AMD Ryzen (Dali)");
-   FMSQ( 8,15,  3, 1,  0, dR, "AMD Ryzen (Castle Peak B0)");
-   FMQ ( 8,15,  3, 1,     dR, "AMD Ryzen (Castle Peak)");
-   FMSQ( 8,15,  3, 1,  0, sE, "AMD EPYC (Rome B0)");
-   FMQ ( 8,15,  3, 1,     sE, "AMD EPYC (Rome)");
-   FMS ( 8,15,  3, 1,  0,     "AMD Ryzen (Castle Peak B0) / EPYC (Rome B0)");
-   FM  ( 8,15,  3, 1,         "AMD Ryzen (Castle Peak) / EPYC (Rome)");
+   FMSQ( 8,15,  0, 8,  2, dH, "AMD Ryzen Threadripper 2000 (Colfax B2)");
+   FMSQ( 8,15,  0, 8,  2, dR, "AMD Ryzen 2000 (Pinnacle Ridge PiR-B2)");
+   FMS ( 8,15,  0, 8,  2,     "AMD Ryzen (unknown type) (Pinnacle Ridge PiR-B2)");
+   FMQ ( 8,15,  0, 8,     dH, "AMD Ryzen Threadripper 2000 (Colfax)");
+   FMQ ( 8,15,  0, 8,     dR, "AMD Ryzen 2000 (Pinnacle Ridge)");
+   FM  ( 8,15,  0, 8,         "AMD Ryzen (unknown type) (Pinnacle Ridge)");
+   FMS ( 8,15,  1, 0,  1,     "AMD Ryzen (unknown type) (Raven Ridge/Great Horned Owl/Banded Kestrel RV-A1)"); // found only on en.wikichip.org & instlatx64 examples; sandpile.org
+   FMSQ( 8,15,  1, 1,  0, dA, "AMD Athlon Pro 200 (Raven Ridge RV-A1)");
+   FMSQ( 8,15,  1, 1,  0, VR, "AMD Ryzen Embedded V1000 (Great Horned Owl RV-B0)"); // only instlatx64 example; stepping from usual pattern
+   FMSQ( 8,15,  1, 1,  0, RR, "AMD Ryzen Embedded R1000 (Banded Kestrel RV-B0)"); // guess based on Great Horned Owl pattern
+   FMSQ( 8,15,  1, 1,  0, AR, "AMD Ryzen 2000 (Raven Ridge RV-B0)"); // found only on en.wikichip.org & instlatx64 examples; stepping from usual pattern
+   FMS ( 8,15,  1, 1,  0,     "AMD Ryzen (unknown type) (Raven Ridge/Great Horned Owl/Banded Kestrel RV-B0)"); // found only on en.wikichip.org & instlatx64 examples; stepping from usual pattern
+   FMQ ( 8,15,  1, 1,     dA, "AMD Athlon Pro 200 (Raven Ridge)");
+   FMQ ( 8,15,  1, 1,     VR, "AMD Ryzen Embedded V1000 (Great Horned Owl)"); // only instlatx64 example
+   FMQ ( 8,15,  1, 1,     RR, "AMD Ryzen Embedded R1000 (Banded Kestrel)"); // guess based on Great Horned Owl pattern
+   FMQ ( 8,15,  1, 1,     AR, "AMD Ryzen 2000 (Raven Ridge)"); // found only on en.wikichip.org & instlatx64 examples
+   FM  ( 8,15,  1, 1,         "AMD Ryzen (unknown type) (Raven Ridge/Great Horned Owl/Banded Kestrel)"); // found only on en.wikichip.org & instlatx64 examples
+   FMSQ( 8,15,  1, 8,  1, dA, "AMD Athlon Pro 300 (Picasso A1)"); // only instlatx64 example
+   FMSQ( 8,15,  1, 8,  1, AR, "AMD Ryzen 3000 (Picasso A1)");
+   FMS ( 8,15,  1, 8,  1,     "AMD (unknown type) (Picasso A1)");
+   FMQ ( 8,15,  1, 8,     dA, "AMD Athlon Pro 300 (Picasso)");
+   FMQ ( 8,15,  1, 8,     AR, "AMD Ryzen 3000 (Picasso)");
+   FM  ( 8,15,  1, 8,         "AMD (unknown type) (Picasso)");
+   FMSQ( 8,15,  2, 0,  1, dR, "AMD Ryzen 1000 (Dali A1)");
+   FMS ( 8,15,  2, 0,  1,     "AMD (unknown type) (Dali A1)");
+   FMQ ( 8,15,  2, 0,     dR, "AMD Ryzen 1000 (Dali)");
+   FM  ( 8,15,  2, 0,         "AMD (unknown type) (Dali)");
+   FMSQ( 8,15,  3, 1,  0, dR, "AMD Ryzen Threadripper 3000 (Castle Peak B0)");
+   FMQ ( 8,15,  3, 1,     dR, "AMD Ryzen Threadripper 3000 (Castle Peak)");
+   FMSQ( 8,15,  3, 1,  0, sE, "AMD EPYC (2nd Gen) (Rome B0)");
+   FMQ ( 8,15,  3, 1,     sE, "AMD EPYC (2nd Gen) (Rome)");
+   FMS ( 8,15,  3, 1,  0,     "AMD (unknown type) (Castle Peak/Rome B0)");
+   FM  ( 8,15,  3, 1,         "AMD (unknown type) (Castle Peak/Rome)");
+   FM  ( 8,15,  4, 7,         "AMD 4700S Desktop Kit (Oberon)"); // undocumented; instlatx64 sample; engr sample?
    FM  ( 8,15,  5, 0,         "AMD DG02SRTBP4MFA (Fenghuang 15FF)"); // internal model, only instlatx64 example
-   FMS ( 8,15,  6, 0,  1,     "AMD Ryzen (Renoir A1)");
-   FM  ( 8,15,  6, 0,         "AMD Ryzen (Renoir)");
-   FMS ( 8,15,  7, 1,  0,     "AMD Ryzen (Matisse B0)"); // undocumented, but samples from Steven Noonan
-   FM  ( 8,15,  7, 1,         "AMD Ryzen (Matisse)"); // undocumented, but samples from Steven Noonan
+   FMSQ( 8,15,  6, 0,  1, ER, "AMD Ryzen Embedded V2000 (Grey Hawk A1)"); // found only on en.wikichip.org
+   FMSQ( 8,15,  6, 0,  1, dR, "AMD Ryzen 4000 (Renoir A1)");
+   FMS ( 8,15,  6, 0,  1,     "AMD (unknown type) (Renoir/Grey Hawk A1)");
+   FMQ ( 8,15,  6, 0,     ER, "AMD Ryzen Embedded V2000 (Grey Hawk)"); // found only on en.wikichip.org
+   FMQ ( 8,15,  6, 0,     dR, "AMD Ryzen 4000 (Renoir)");
+   FM  ( 8,15,  6, 0,         "AMD (unknown type) (Renoir/Grey Hawk)");
+   FMS ( 8,15,  6, 8,  1,     "AMD Ryzen 5000 (Lucienne A1)"); // undocumented, but instlatx64 samples
+   FM  ( 8,15,  6, 8,         "AMD Ryzen 5000 (Lucienne)"); // undocumented, but instlatx64 samples
+   FMS ( 8,15,  7, 1,  0,     "AMD Ryzen 3000 (Matisse B0)"); // undocumented, but samples from Steven Noonan
+   FM  ( 8,15,  7, 1,         "AMD Ryzen 3000 (Matisse)"); // undocumented, but samples from Steven Noonan
+   FMS ( 8,15,  9, 0,  0,     "AMD Ryzen (Van Gogh A0)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FMS ( 8,15,  9, 0,  2,     "AMD Ryzen (Van Gogh A2)"); // undocumented, but example from instlatx64
+   FM  ( 8,15,  9, 0,         "AMD Ryzen (Van Gogh)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FM  ( 8,15,  9, 8,         "AMD Ryzen (Mero)"); // undocumented, but (engr?) sample via instlatx64 from @zimogorets
+   FM  ( 8,15, 10, 0,         "AMD Ryzen (Mendocino)"); // undocumented, but (engr?) sample via instlatx64 from @ExecuFix
    F   ( 8,15,                "AMD (unknown model)");
-   F   (10,15,                "AMD (unknown model)"); // undocumented, but samples from Steven Noonan
+   FMS (10,15,  0, 1,  1,     "AMD EPYC (3rd Gen) (Milan B1)");
+   FMS (10,15,  0, 1,  2,     "AMD EPYC (3rd Gen) (Milan B2)");
+   FM  (10,15,  0, 1,         "AMD EPYC (3rd Gen) (Milan)");
+   FMS (10,15,  0, 8,  0,     "AMD Ryzen Threadripper 5000 (Chagall A0)"); // undocumented, but sample from CCRT
+   FMS (10,15,  0, 8,  2,     "AMD Ryzen Threadripper 5000 (Chagall A2)"); // undocumented, but sample from CCRT
+   FM  (10,15,  0, 8,         "AMD Ryzen Threadripper 5000 (Chagall)"); // undocumented, but sample from CCRT
+   FMS (10,15,  1, 0,  0,     "AMD EPYC (Genoa A0)"); // undocumented, but (engr?) sample via instlatx64 from @ExecuFix
+   FM  (10,15,  1, 0,         "AMD EPYC (Genoa)"); // undocumented, but (engr?) sample via instlatx64 from @ExecuFix
+   FMS (10,15,  1, 8,  0,     "AMD Ryzen (Storm Peak A0)"); // undocumented, but (engr?) sample from @patrickschur_
+   FMS (10,15,  1, 8,  1,     "AMD Ryzen (Storm Peak A1)"); // undocumented, but engr sample via instlatx64 from einstein11.aei.uni-hannover.de (12981157)
+   FM  (10,15,  1, 8,         "AMD Ryzen (Storm Peak)"); // undocumented, but (engr?) sample from @patrickschur_
+   FMS (10,15,  2, 1,  0,     "AMD Ryzen 5000 (Vermeer B0)"); // undocumented, but instlatx64 samples
+   FMS (10,15,  2, 1,  1,     "AMD Ryzen 5000 (Vermeer B1)"); // undocumented, but sample from @patrickschur_
+   FMS (10,15,  2, 1,  2,     "AMD Ryzen 5000 (Vermeer B2)"); // undocumented, but sample from @patrickschur_
+   FM  (10,15,  2, 1,         "AMD Ryzen 5000 (Vermeer)");
+   FMS (10,15,  3, 0,  0,     "AMD Ryzen (Badami A0)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FM  (10,15,  3, 0,         "AMD Ryzen (Badami)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FMS (10,15,  4, 0,  0,     "AMD Ryzen (Rembrandt A0)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FM  (10,15,  4, 0,         "AMD Ryzen (Rembrandt)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FMS (10,15,  4, 4,  1,     "AMD Ryzen (Rembrandt E1)"); // undocumented, but instlatx64 sample
+   FM  (10,15,  4, 4,         "AMD Ryzen (Rembrandt)"); // undocumented, but instlatx64 sample
+   FMS (10,15,  5, 0,  0,     "AMD Ryzen 5000 (Cezanne/Barcelo A0)"); // undocumented, but instlatx64 samples
+   FM  (10,15,  5, 0,         "AMD Ryzen 5000 (Cezanne/Barcelo)"); // undocumented, but instlatx64 samples
+   FMS (10,15,  5, 1,  1,     "AMD Ryzen 5000 (Cezanne/Barcelo B1)");
+   FM  (10,15,  5, 1,         "AMD Ryzen 5000 (Cezanne/Barcelo)");
+   FMS (10,15,  6, 0,  0,     "AMD Ryzen (Raphael A0)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FM  (10,15,  6, 0,         "AMD Ryzen (Raphael)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FMS (10,15,  6, 1,  2,     "AMD Ryzen (Raphael B2)"); // undocumented, but instlatx64 sample
+   FM  (10,15,  6, 1,         "AMD Ryzen (Raphael)"); // undocumented, but instlatx64 sample
+   FMS (10,15,  7, 0,  0,     "AMD Ryzen (Phoenix A0)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FM  (10,15,  7, 0,         "AMD Ryzen (Phoenix)"); // undocumented, but (engr?) sample via instlatx64 from @patrickschur_
+   FMS (10,15,  7, 4,  0,     "AMD Ryzen (Phoenix E0)"); // undocumented, but engr sample via instlatx64 from bakerlab.org (6220795)
+   FM  (10,15,  7, 4,         "AMD Ryzen (Phoenix)"); // undocumented, but engr sample via instlatx64 from bakerlab.org (6220795)
+   FMS (10,15, 10, 0,  0,     "AMD Ryzen (Bergamo A0)"); // undocumented, but (engr?) sample via instlatx64 from @ExecuFix
+   FM  (10,15, 10, 0,         "AMD Ryzen (Bergamo)"); // undocumented, but (engr?) sample via instlatx64 from @ExecuFix
+   F   (10,15,                "AMD (unknown model)");
    DEFAULT                  ("unknown");
 
    const char*  brand_pre;
@@ -4311,15 +4606,14 @@ decode_synth_cyrix(unsigned int         val,
    cstring  result = NULL;
    
    START;
-   FM (0,4,  0,4,     "Cyrix Media GX / GXm");
+   FM (0,4,  0,4,     "Cyrix MediaGX/GXi");
    FM (0,4,  0,9,     "Cyrix 5x86");
    F  (0,4,           "Cyrix 5x86 (unknown model)");
    FM (0,5,  0,2,     "Cyrix M1 6x86");
-   FMQ(0,5,  0,4, cm, "Cyrix MediaGX (C6)");
-   FM (0,5,  0,4,     "Cyrix M1 WinChip (C6)");
-   FM (0,5,  0,8,     "Cyrix M1 WinChip 2 (C6-2)");
-   FM (0,5,  0,9,     "Cyrix M1 WinChip 3 (C6-2)");
-   F  (0,5,           "Cyrix M1 (unknown model)");
+   FM (0,5,  0,3,     "Cyrix M1 6x86"); // M1-6
+   FMQ(0,5,  0,4, cm, "Cyrix MediaGXm");
+   FM (0,5,  0,4,     "NSC Geode GX1/GXLV/GXm");
+   F  (0,5,           "Cyrix M1 / MediaGX / NSC Geode (unknown model)");
    FM (0,6,  0,0,     "Cyrix M2 6x86MX");
    FM (0,6,  0,5,     "Cyrix M2");
    F  (0,6,           "Cyrix M2 (unknown model)");
@@ -4337,6 +4631,7 @@ decode_synth_via(unsigned int         val,
    START;
    FM  (0, 5,  0, 4,         "VIA WinChip (C6)");
    FM  (0, 5,  0, 8,         "VIA WinChip 2 (C6-2)");
+   FM  (0, 5,  0, 9,         "VIA WinChip 3 (C6-3)");
    FM  (0, 6,  0, 6,         "VIA C3 (Samuel C5A)");
    FMS (0, 6,  0, 7,  0,     "VIA C3 (Samuel 2 C5B) / Eden ESP 4000/5000/6000, .15um");
    FMS (0, 6,  0, 7,  1,     "VIA C3 (Samuel 2 C5B) / Eden ESP 4000/5000/6000, .15um");
@@ -4388,9 +4683,15 @@ decode_synth_via(unsigned int         val,
    FMSQ(0, 6,  0,15, 14, vZ, "Zhaoxin KaiXian/Kaisheng ZX-C/ZX-C+");
    FMS (0, 6,  0,15, 14,     "VIA Eden X4 4000 (Isaiah CNR)");
    FM  (0, 6,  0,15,         "VIA Nano / Eden (unknown type) (Isaiah)");
+   FMQ (0, 6,  1, 9,     vZ, "Zhaoxin KaiXian/Kaisheng ZX-C/ZX-C+"); // Google_cpu_features*
+   // Lots of examples with stepping 1, but no indication of the stepping name.
+   FMS (0, 6,  4, 7,  1,     "VIA (CHA)");
+   FM  (0, 6,  4, 7,         "VIA (CHA)");
    F   (0, 6,                "VIA C3 / C3-M / C7 / C7-M / Eden / Eden ESP 7000/8000/10000 / Nano (unknown model)");
-   FM  (0, 7,  0,11,         "Zhaoxin KaiXian KX-5000 / Kaisheng KH-20000 (WuDaoKou)"); // geekbench.com example
-   FMQ (0, 7,  3,11,     vZ, "Zhaoxin KaiXian KX-6000 / Kaisheng KH-30000 (LuJiaZui)"); // instlatx64 example with CentaurHauls vendor!
+   FM  (0, 7,  0,11,         "Zhaoxin KaiXian KX-5000 / Kaisheng KH-20000"); // geekbench.com example
+   FM  (0, 7,  1,11,         "Zhaoxin KaiXian KX-5000 / Kaisheng KH-20000"); // Google_cpu_features*
+   FMQ (0, 7,  3,11,     vZ, "Zhaoxin KaiXian KX-6000 / Kaisheng KH-30000"); // instlatx64 example with CentaurHauls vendor!
+   FMQ (0, 7,  5,11,     vZ, "Zhaoxin KaiXian KX-7000 / Kaisheng KH-40000"); // Google_cpu_features*
    DEFAULT                 ("unknown");
 
    return result;
@@ -4499,6 +4800,8 @@ decode_synth_vortex(unsigned int  val)
    START;
    FM (0, 5,  0, 2,     "Vortex86DX");
    FM (0, 5,  0, 8,     "Vortex86MX");
+   FM (0, 6,  0, 0,     "Vortex86EX2"); // undocumented; /proc/cpuinfo seen in wild
+   FM (0, 6,  0, 1,     "Vortex86DX3"); // undocumented; only instlatx64 example
    DEFAULT             ("unknown");
 
    return result;
@@ -4584,7 +4887,7 @@ decode_x_synth_amd(unsigned int  val)
    FMS (0, 7,  0,10,  0, "AMD Athlon XP / Athlon MP / Sempron / mobile Athlon XP-M / mobile Athlon XP-M (LV) (Barton A2)");
    FM  (0, 7,  0,10,     "AMD Athlon XP / Athlon MP / Sempron / mobile Athlon XP-M / mobile Athlon XP-M (LV) (Barton)");
    F   (0, 7,            "AMD Athlon XP / Athlon MP / Sempron / Duron / Duron MP / mobile Athlon / mobile Athlon XP-M / mobile Athlon XP-M (LV) / mobile Duron (unknown model)");
-   FALLBACK({ result = append_uarch(decode_synth_amd(val, NULL), val, VENDOR_AMD); })
+   FALLBACK({ result = append_uarch(decode_synth_amd(val, NULL), val, VENDOR_AMD, NULL); })
 
    return result;
 }
@@ -4607,7 +4910,7 @@ decode_x_synth_hygon(unsigned int  val)
    cstring  result;
    
    START;
-   FALLBACK({ result = append_uarch(decode_synth_hygon(val), val, VENDOR_HYGON); })
+   FALLBACK({ result = append_uarch(decode_synth_hygon(val), val, VENDOR_HYGON, NULL); })
 
    return result;
 }
@@ -4646,7 +4949,7 @@ decode_x_synth_via(unsigned int  val)
    F  (0,6,           "VIA C3 (unknown model)");
    DEFAULT           ("unknown");
 
-   return append_uarch(result, val, VENDOR_VIA);
+   return append_uarch(result, val, VENDOR_VIA, NULL);
 }
 
 static void
@@ -4718,7 +5021,7 @@ decode_synth(unsigned int         val_eax,
       break;
    }
 
-   return append_uarch(synth, val_eax, vendor);
+   return append_uarch(synth, val_eax, vendor, stash);
 }
 
 static void
@@ -4741,9 +5044,13 @@ print_synth(const code_stash_t*  stash)
    }
 }
 
-#define Synth_Family(value) \
+// Synth_Family reflects AMD's "Family" definition:
+// the sum of the extended family and basic family
+#define Synth_Family(value)       \
    (BIT_EXTRACT_LE(value, 20, 28) \
     + BIT_EXTRACT_LE(value, 8, 12))
+// Synth_Model reflects AMD's "Model" definition:
+// the bitwise catenation of the extended model and basic model
 #define Synth_Model(value) \
    ((BIT_EXTRACT_LE(value, 16, 20) << 4) \
     + BIT_EXTRACT_LE(value, 4, 8))
@@ -4904,7 +5211,7 @@ static void print_mp_synth(const struct mp*  mp)
 
 static int bits_needed(unsigned long  v)
 {
-#if __GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__ >= 30400
+#ifdef USE_BUILTIN_CLZL
    return v <= 1 ? 0 : (8 * sizeof(long) - __builtin_clzl(v-1));
 #else
    if (v == 0) return 0;
@@ -5146,17 +5453,17 @@ print_1_eax(unsigned int  value,
    print_synth_simple(value, vendor);
 }
 
-#define B(b,str)                                   \
-   else if (   __B(val_ebx)   == _B(b))            \
-      ACT(str)
-#define FMB(xf,f,xm,m,b,str)                       \
-   else if (   __FM(val_eax)  == _FM(xf,f,xm,m)    \
-            && __B(val_ebx)   == _B(b))            \
-      ACT(str)
-#define FMSB(xf,f,xm,m,s,b,str)                    \
-   else if (   __FMS(val_eax) == _FMS(xf,f,xm,m,s) \
-            && __B(val_ebx)   == _B(b))            \
-      ACT(str)
+#define B(b,...)                             \
+   else if (   MaskB(val_ebx)   == ShftB(b)) \
+      ACT(__VA_ARGS__)
+#define FMB(xf,f,xm,m,b,...)                         \
+   else if (   MaskFM(val_eax)  == ShftFM(xf,f,xm,m) \
+            && MaskB(val_ebx)   == ShftB(b))         \
+      ACT(__VA_ARGS__)
+#define FMSB(xf,f,xm,m,s,b,...)                         \
+   else if (   MaskFMS(val_eax) == ShftFMS(xf,f,xm,m,s) \
+            && MaskB(val_ebx)   == ShftB(b))            \
+      ACT(__VA_ARGS__)
 
 #define ACT(str)  (printf(str))
 
@@ -5164,7 +5471,7 @@ static void
 print_brand(unsigned int  val_eax,
             unsigned int  val_ebx)
 {
-   printf("   brand id = 0x%02x (%u): ", __B(val_ebx), __B(val_ebx));
+   printf("   brand id = 0x%02x (%u): ", MaskB(val_ebx), MaskB(val_ebx));
    START;
    B   (                  1, "Intel Celeron, .18um");
    B   (                  2, "Intel Pentium III, .18um");
@@ -5357,7 +5664,7 @@ static void print_2_byte(unsigned char  value,
    case 0x3c: printf("L2 cache: 256K, 4-way, sectored, 64 byte lines");  break;
    case 0x3d: printf("L2 cache: 384K, 6-way, sectored, 64 byte lines");  break;
    case 0x3e: printf("L2 cache: 512K, 4-way, sectored, 64 byte lines");  break;
-   case 0x40: if (__F(val_1_eax) <= _XF(0) + _F(6)) {
+   case 0x40: if (MaskF(val_1_eax) <= ShftXF(0) + ShftF(6)) {
                  printf("No L2 cache");
               } else {
                  printf("No L3 cache");
@@ -5371,7 +5678,7 @@ static void print_2_byte(unsigned char  value,
    case 0x46: printf("L3 cache: 4M, 4-way, 64 byte lines");              break;
    case 0x47: printf("L3 cache: 8M, 8-way, 64 byte lines");              break;
    case 0x48: printf("L2 cache: 3M, 12-way, 64 byte lines");             break;
-   case 0x49: if (__FM(val_1_eax) == _XF(0) + _F(15) + _XM(0) + _M(6)) {
+   case 0x49: if (MaskFM(val_1_eax) == ShftFM(0,15, 0, 6)) {
                  printf("L3 cache: 4M, 16-way, 64 byte lines");
               } else {
                  printf("L2 cache: 4M, 16-way, 64 byte lines");
@@ -5499,7 +5806,7 @@ print_4_eax(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 36);
+               /* max_len => */ 34);
 }
 
 static void
@@ -5512,7 +5819,7 @@ print_4_ebx(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 36);
+               /* max_len => */ 34);
 }
 
 static void
@@ -5523,7 +5830,7 @@ print_4_ecx(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 36);
+               /* max_len => */ 34);
 }
 
 static void
@@ -5536,7 +5843,7 @@ print_4_edx(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 36);
+               /* max_len => */ 34);
 }
 
 static void
@@ -5548,7 +5855,7 @@ print_4_synth(const unsigned int  words[])
    unsigned int  sets       = words[WORD_ECX] + 1;
    unsigned int  size       = (ways_assoc * parts * line_size * sets);
    
-   printf("      (size synth)                         = %u", size);
+   printf("      (size synth)                       = %u", size);
    if (size > 1048576) {
       if ((size % 1048576) == 0) {
          printf(" (%u MB)", size / 1048576);
@@ -5640,7 +5947,7 @@ print_6_eax(unsigned int  value)
           { "IA32_HWP_REQUEST MSR fast access mode"   , 18, 18, bools },
           { "HW_FEEDBACK MSRs supported"              , 19, 19, bools },
           { "ignoring idle logical processor HWP req" , 20, 20, bools },
-          { "enhanced hardware feedback interface"    , 23, 23, bools },
+          { "Thread Director"                         , 23, 23, bools },
         };
 
    print_names(value, names, LENGTH(names),
@@ -5665,7 +5972,7 @@ print_6_ecx(unsigned int  value)
       = { { "hardware coordination feedback"          ,  0,  0, bools },
           { "ACNT2 available"                         ,  1,  1, bools },
           { "performance-energy bias capability"      ,  3,  3, bools },
-          { "number of enh hardware feedback classes" ,  8, 11, NIL_IMAGES },
+          { "number of enh hardware feedback classes" ,  8, 15, NIL_IMAGES },
         };
 
    print_names(value, names, LENGTH(names),
@@ -5711,7 +6018,11 @@ print_7_0_ebx(unsigned int  value)
           { "RDSEED instruction"                      , 18, 18, bools },
           { "ADX instructions"                        , 19, 19, bools },
           { "SMAP: supervisor mode access prevention" , 20, 20, bools },
-          { "AVX512IFMA: fused multiply add"          , 21, 21, bools },
+          { "AVX512IFMA: integer fused multiply add"  , 21, 21, bools },
+          // NOTE: AMD Appendix E.3.6 claims bit 22 is RDPID support, but this
+          // almost certainly is an error.  Section 3 RDPID description says it
+          // is 7/0/ecx, as does Table 3-1.  And this is consistent with Intel
+          // architectures.
           { "PCOMMIT instruction"                     , 22, 22, bools },
           { "CLFLUSHOPT instruction"                  , 23, 23, bools },
           { "CLWB instruction"                        , 24, 24, bools },
@@ -5747,10 +6058,11 @@ print_7_0_ecx(unsigned int  value)
           { "AVX512_BITALG: bit count/shiffle"        , 12, 12, bools },
           { "TME: Total Memory Encryption"            , 13, 13, bools },
           { "AVX512: VPOPCNTDQ instruction"           , 14, 14, bools },
-          { "5-level paging"                          , 16, 16, bools },
+          { "LA57: 57-bit addrs & 5-level paging"     , 16, 16, bools },
           { "BNDLDX/BNDSTX MAWAU value in 64-bit mode", 17, 21, NIL_IMAGES },
-          { "RDPID: read processor D supported"       , 22, 22, bools },
+          { "RDPID: read processor ID supported"      , 22, 22, bools },
           { "KL: key locker"                          , 23, 23, bools },
+          { "bus lock detection"                      , 24, 24, bools },
           { "CLDEMOTE supports cache line demote"     , 25, 25, bools },
           { "MOVDIRI instruction"                     , 27, 27, bools },
           { "MOVDIR64B instruction"                   , 28, 28, bools },
@@ -5766,14 +6078,21 @@ print_7_0_ecx(unsigned int  value)
 static void
 print_7_0_edx(unsigned int  value)
 {
+   // Bit 9 (SRBDS_CTRL) described in Intel's "Special Register Buffer Data
+   // Sampling", Last Updated 06/09/2020.
+   // Bit 11 (RTM_ALWAYS_ABORT) described in "Intel Transactional
+   // Synchronization Extensions (Intel TSX) Memory and Performance Monitoring
+   // Update for Intel Processors", Last Reviewed 02/09/2022.
    static named_item  names[]
       = { { "AVX512_4VNNIW: neural network instrs"    ,  2,  2, bools },
           { "AVX512_4FMAPS: multiply acc single prec" ,  3,  3, bools },
           { "fast short REP MOV"                      ,  4,  4, bools },
           { "UINTR: user interrupts"                  ,  5,  5, bools },
           { "AVX512_VP2INTERSECT: intersect mask regs",  8,  8, bools },
-          { "SRBDS mitigation MSR available"          ,  9,  9, bools }, // LX*
+          { "SRBDS mitigation MSR available"          ,  9,  9, bools },
           { "VERW MD_CLEAR microcode support"         , 10, 10, bools },
+          { "RTM transaction always aborts"           , 11, 11, bools },
+          { "TSX_FORCE_ABORT"                         , 13, 13, bools },
           { "SERIALIZE instruction"                   , 14, 14, bools },
           { "hybrid part"                             , 15, 15, bools },
           { "TSXLDTRK: TSX suspend load addr tracking", 16, 16, bools },
@@ -5799,12 +6118,57 @@ static void
 print_7_1_eax(unsigned int  value)
 {
    static named_item  names[]
-      = { { "AVX-VNNI: AVX VNNI neural network instrs",  4,  4, bools },
+      = { { "RAO-INT atomic instructions"             ,  3,  3, bools },
+          { "AVX-VNNI: AVX VNNI neural network instrs",  4,  4, bools },
           { "AVX512_BF16: bfloat16 instructions"      ,  5,  5, bools },
-          { "zero-length MOVSB"                       , 10, 10, bools },
+          { "CMPccXADD instructions"                  ,  7,  7, bools },
+          { "ArchPerfmonExt is valid"                 ,  8,  8, bools },
+          { "fast zero-length MOVSB"                  , 10, 10, bools },
           { "fast short STOSB"                        , 11, 11, bools },
           { "fast short CMPSB, SCASB"                 , 12, 12, bools },
+          { "WRMSRNS instruction"                     , 19, 19, bools },
+          { "AMX-FP16: FP16 tile operations"          , 21, 21, bools },
           { "HRESET: history reset support"           , 22, 22, bools },
+          { "AVX-IFMA: integer fused multiply add"    , 23, 23, bools },
+          { "LAM: linear address masking"             , 26, 26, bools },
+          { "RDMSRLIST, WRMSRLIST instructions"       , 27, 27, bools },
+      };
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 40);
+}
+
+static void
+print_7_1_ebx(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "IA32_PPIN & IA32_PPIN_CTL MSRs supported",  0,  0, bools },
+      };
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 40);
+}
+
+static void
+print_7_1_edx(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "AVX-VNNI-INT8 instructions"              ,  4,  4, bools },
+          { "AVX-NE-CONVERT instructions"             ,  5,  5, bools },
+          { "PREFETCHIT0, PREFETCHIT1 instructions"   , 14, 14, bools },
+      };
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 40);
+}
+
+static void
+print_7_2_edx(unsigned int  value)
+{
+   // Described in Intel's "Branch History Injection and Intra-mode Branch Target
+   // Injection / CVE-2022-0001, CVE-2022-0002 / INTEL-SA-00598", Last Updated
+   // 07/12/2022.
+   static named_item  names[]
+      = { { "IPRED_CTRL: IBP disable"                 ,  1,  1, bools },
+          { "RRSBA_CTRL: IBP bottomless RSB disable"  ,  2,  2, bools },
+          { "BHI_CTRL: IBP BHB-focused disable"       ,  4,  4, bools },
       };
    print_names(value, names, LENGTH(names),
                /* max_len => */ 40);
@@ -5825,16 +6189,24 @@ print_a_eax(unsigned int  value)
 }
 
 static void
-print_a_ebx(unsigned int  value)
+print_a_ebx(unsigned int  value,
+            unsigned int  val_eax)
 {
+   // Bits >= EAX[31:24] are ignored and assumed to be not available
+   value |= ~RIGHTMASK(BIT_EXTRACT_LE(val_eax, 24, 32));
+   
+   static ccstring  notavails[] = { "available",
+                                    "not available" };
+
    static named_item  names[]
-      = { { "core cycle event not available"          ,  0,  0, bools },
-          { "instruction retired event not available" ,  1,  1, bools },
-          { "reference cycles event not available"    ,  2,  2, bools },
-          { "last-level cache ref event not available",  3,  3, bools },
-          { "last-level cache miss event not avail"   ,  4,  4, bools },
-          { "branch inst retired event not available" ,  5,  5, bools },
-          { "branch mispred retired event not avail"  ,  6,  6, bools },
+      = { { "core cycle event"                        ,  0,  0, notavails },
+          { "instruction retired event"               ,  1,  1, notavails },
+          { "reference cycles event"                  ,  2,  2, notavails },
+          { "last-level cache ref event"              ,  3,  3, notavails },
+          { "last-level cache miss event"             ,  4,  4, notavails },
+          { "branch inst retired event"               ,  5,  5, notavails },
+          { "branch mispred retired event"            ,  6,  6, notavails },
+          { "top-down slots event"                    ,  7,  7, notavails },
         };
 
    print_names(value, names, LENGTH(names),
@@ -5856,7 +6228,7 @@ static void
 print_a_edx(unsigned int  value)
 {
    static named_item  names[]
-      = { { "number of fixed counters"                ,  0,  4, NIL_IMAGES },
+      = { { "number of contiguous fixed counters"     ,  0,  4, NIL_IMAGES },
           { "bit width of fixed counters"             ,  5, 12, NIL_IMAGES },
           { "anythread deprecation"                   , 15, 15, bools },
         };
@@ -5909,17 +6281,19 @@ print_b_1f_ecx(unsigned int  value)
 static void
 print_d_0_eax(unsigned int  value)
 {
-   /*
-   ** State component bitmaps in general are described in 325462: Intel 64 and
-   ** IA-32 Architectures Software Developer's Manual Combined Volumes: 1, 2A,
-   ** 2B, 2C, 3A, 3B, and 3C, Volume 1: Basic Architecture, section 13.1:
-   ** XSAVE-Supported Features and State-Component Bitmaps.  This leaf describes
-   ** which of the bits are actually supported by the hardware, and is described
-   ** better in 13.2: Enumeration of CPU Support for XSAVE Instructions and
-   ** XSAVE-Supported Features.
-   ** 
-   ** These align with the supported features[] in print_d_n() for values > 1.
-   */
+
+   // State component bitmaps in general are described in 325462: Intel 64 and
+   // IA-32 Architectures Software Developer's Manual Combined Volumes: 1, 2A,
+   // 2B, 2C, 3A, 3B, and 3C, Volume 1: Basic Architecture, section 13.1:
+   // XSAVE-Supported Features and State-Component Bitmaps.  This leaf describes
+   // which of the bits are actually supported by the hardware, and is described
+   // better in 13.2: Enumeration of CPU Support for XSAVE Instructions and
+   // XSAVE-Supported Features.
+   // 
+   // These align with the supported features[] in print_d_n() for values > 1.
+   //
+   // See also print_12_1_ecx().
+
    static named_item  names[]
       = { { "   XCR0 supported: x87 state"            ,  0,  0, bools },
           { "   XCR0 supported: SSE state"            ,  1,  1, bools },
@@ -5943,6 +6317,14 @@ print_d_0_eax(unsigned int  value)
 
    print_names(value, names, LENGTH(names),
                /* max_len => */ 39);
+}
+
+static void
+print_d_0_edx(unsigned int  value UNUSED)
+{
+   // Upper 32 bits of XCR0: Currently all bits reserved.
+   
+   // See also print_12_1_edx().
 }
 
 static void
@@ -5980,15 +6362,14 @@ static void
 print_d_n(const unsigned int  words[WORD_NUM],
           unsigned int        try)
 {
-   /*
-   ** The XSAVE areas are explained in 325462: Intel 64 and IA-32 Architectures
-   ** Software Developer's Manual Combined Volumes: 1, 2A, 2B, 2C, 3A, 3B, and
-   ** 3C, Volume 1: Basic Architecture, section 13.1: XSAVE-Supported Features
-   ** and State-Component Bitmaps.
-   ** 
-   ** These align with the supported feature names[] in print_d_0_eax() for
-   ** values > 1.
-   */
+   // The XSAVE areas are explained in 325462: Intel 64 and IA-32 Architectures
+   // Software Developer's Manual Combined Volumes: 1, 2A, 2B, 2C, 3A, 3B, and
+   // 3C, Volume 1: Basic Architecture, section 13.1: XSAVE-Supported Features
+   // and State-Component Bitmaps.
+   // 
+   // These align with the supported feature names[] in print_d_0_eax() for
+   // values > 1.
+
    static ccstring features[64] = { /*  0 => */ "internal error",
                                     /*  1 => */ "internal error",
                                     /*  2 => */ "AVX/YMM",
@@ -6083,14 +6464,42 @@ print_f_0_edx(unsigned int  value)
 }
 
 static void
-print_f_1_eax(unsigned int  value)
+print_f_1_eax(unsigned int         value,
+              const code_stash_t*  stash)
 {
    static named_item  names[]
-      = { { "IA32_QM_CTR bit 61 is overflow"          ,  8,  8, bools },
+      = { { "QoS monitoring counter size-24"          ,  0,  7, NIL_IMAGES },
+          { "IA32_QM_CTR bit 61 is overflow"          ,  8,  8, bools },
         };
 
    print_names(value, names, LENGTH(names),
                /* max_len => */ 43);
+
+   unsigned int  counter_size_raw = BIT_EXTRACT_LE(value, 0, 8);
+   unsigned int  counter_size;
+   if (counter_size_raw == 0) {
+      unsigned int  synth_family = Synth_Family(stash->val_1_eax);
+      unsigned int  synth_model  = Synth_Model(stash->val_1_eax);
+      if (synth_family == 0x17 && 0x30 <= synth_model && synth_model <= 0x9f) {
+         // V1.0 PQoS => 62
+         counter_size = 62;
+      } else if (synth_family == 0x19 && synth_model <= 0x0f) {
+         // V2.0 PQoS => 44
+         counter_size = 44;
+      } else if (synth_family == 0x19
+                 && 0x20 <= synth_model && synth_model <= 0x5f) {
+         // V2.0 PQoS => 44
+         counter_size = 44;
+      } else {
+         counter_size = 0;
+      }
+   } else {
+      counter_size = 24 + counter_size_raw;
+   }
+   if (counter_size != 0) {
+      printf("      (QoS monitoring counter size synth)         = %u\n",
+             counter_size);
+   }
 }
 
 static void
@@ -6184,26 +6593,27 @@ print_12_0_eax(unsigned int  value)
           { "SGX2 supported"                          ,  1,  1, bools },
           { "SGX ENCLV E*VIRTCHILD, ESETCONTEXT"      ,  5,  5, bools },
           { "SGX ENCLS ETRACKC, ERDINFO, ELDBC, ELDUC",  6,  6, bools },
+          { "SGX ENCLU EVERIFYREPORT2"                ,  7,  7, bools },
+          { "SGX ENCLU EDECCSSA"                      , 11, 11, bools },
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 38);
+               /* max_len => */ 40);
 }
 
 static void
 print_12_0_ebx(unsigned int  value)
 {
-   /*
-   ** MISCSELECT is described in Table 38-4: Bit Vector Layout of MISCSELECT
-   ** Field of Extended Information.
-   */
+   // MISCSELECT is described in Table 38-4: Bit Vector Layout of MISCSELECT
+   // Field of Extended Information.
+
    static named_item  names[]
       = { { "MISCSELECT.EXINFO supported: #PF & #GP"  ,  0,  0, bools },
           { "MISCSELECT.CPINFO supported: #CP"        ,  1,  1, bools },
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 38);
+               /* max_len => */ 40);
 }
 
 static void
@@ -6215,22 +6625,130 @@ print_12_0_edx(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
+               /* max_len => */ 40);
+}
+
+static void
+print_12_1_eax(unsigned int  value)
+{
+   // SECS.ATTRIBUTES are described in 325462: Intel 64 and IA-32 Architectures
+   // Software Developer's Manual Combined Volumes: 1, 2A, 2B, 2C, 3A, 3B, 3C,
+   // 3D, and 4, Volume 3: System Programming Guide, section 33.7.1: ATTRIBUTES.
+   //
+   // eax contains ATTRIBUTES[31:0].
+
+   static named_item  names[]
+      = { { "enclave initialized by EINIT"            ,  0,  0, bools },
+          { "enclave debugger read/write permission"  ,  1,  1, bools },
+          { "enclave 64-bit mode"                     ,  2,  2, bools },
+          { "provisioning key available"              ,  4,  4, bools },
+          { "EINIT token key available"               ,  5,  5, bools },
+          { "CET attributes enabled"                  ,  6,  6, bools },
+          { "KSS key separation & sharing enabled"    ,  7,  7, bools },
+        };
+
+   print_names(value, names, LENGTH(names),
                /* max_len => */ 38);
+}
+
+static void
+print_12_1_ebx(unsigned int  value UNUSED)
+{
+   // SECS.ATTRIBUTES are described in 325462: Intel 64 and IA-32 Architectures
+   // Software Developer's Manual Combined Volumes: 1, 2A, 2B, 2C, 3A, 3B, 3C,
+   // 3D, and 4, Volume 3: System Programming Guide, section 33.7.1: ATTRIBUTES.
+   //
+   // ebx contains ATTRIBUTES[63:32].
+
+   // Currently all bits reserved.
+}
+
+static void
+print_12_1_ecx(unsigned int  value)
+{
+   // SECS.ATTRIBUTES are described in 325462: Intel 64 and IA-32 Architectures
+   // Software Developer's Manual Combined Volumes: 1, 2A, 2B, 2C, 3A, 3B, 3C,
+   // 3D, and 4, Volume 3: System Programming Guide, section 33.7.1: ATTRIBUTES.
+   //
+   // ebx contains ATTRIBUTES[95:64], which is XFRM[31:0] (described in Volume
+   // 3, 37.7.2.1 SECS.ATTRIBUTES.XFVM), which is equivalent to XCR0[31:0]
+   // (described in Volume 1, 13.1 XSAVE-Supported Features and State-Component
+   // Bitmaps).
+   //
+   // See also print_d_0_eax().
+
+   static named_item  names[]
+      = { { "   XCR0 supported: x87 state"            ,  0,  0, bools },
+          { "   XCR0 supported: SSE state"            ,  1,  1, bools },
+          { "   XCR0 supported: AVX state"            ,  2,  2, bools },
+          { "   XCR0 supported: MPX BNDREGS"          ,  3,  3, bools },
+          { "   XCR0 supported: MPX BNDCSR"           ,  4,  4, bools },
+          { "   XCR0 supported: AVX-512 opmask"       ,  5,  5, bools },
+          { "   XCR0 supported: AVX-512 ZMM_Hi256"    ,  6,  6, bools },
+          { "   XCR0 supported: AVX-512 Hi16_ZMM"     ,  7,  7, bools },
+          { "   IA32_XSS supported: PT state"         ,  8,  8, bools },
+          { "   XCR0 supported: PKRU state"           ,  9,  9, bools },
+          { "   XCR0 supported: CET_U state"          , 11, 11, bools },
+          { "   XCR0 supported: CET_S state"          , 12, 12, bools },
+          { "   IA32_XSS supported: HDC state"        , 13, 13, bools },
+          { "   IA32_XSS supported: UINTR state"      , 14, 14, bools },
+          { "   LBR supported"                        , 15, 15, bools },
+          { "   IA32_XSS supported: HWP state"        , 16, 16, bools },
+          { "   XTILECFG supported"                   , 17, 17, bools },
+          { "   XTILEDATA supported"                  , 18, 18, bools },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 38);
+}
+
+static void
+print_12_1_edx(unsigned int  value UNUSED)
+{
+   // SECS.ATTRIBUTES are described in 325462: Intel 64 and IA-32 Architectures
+   // Software Developer's Manual Combined Volumes: 1, 2A, 2B, 2C, 3A, 3B, 3C,
+   // 3D, and 4, Volume 3: System Programming Guide, section 33.7.1: ATTRIBUTES.
+   //
+   // ebx contains ATTRIBUTES[95:64], which is XFRM[63:32] (described in Volume
+   // 3, 37.7.2.1 SECS.ATTRIBUTES.XFVM), which is equivalent to XCR0[63:32]
+   // (described in Volume 1, 13.1 XSAVE-Supported Features and State-Component
+   // Bitmaps).
+   //
+   // See also print_d_0_edx().
+
+   // Currently all bits reserved.
+}
+
+static void
+print_12_n_eax(unsigned int  value,
+               unsigned int  max_len)
+{
+   static ccstring types[1<<4]
+      = { /* 0 => */ "invalid",
+          /* 1 => */ "EPC section" };
+
+   static named_item  names[]
+      = { { "type"                                    ,  0,  3, types },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ max_len);
 }
 
 static void
 print_12_n_ecx(unsigned int  value)
 {
-   static ccstring props[1<<4] = { /* 0 => */ "enumerated as 0",
-                                   /* 1 => */ "confidentiality & integrity"
-                                              " protection" };
+   static ccstring props[1<<4]
+      = { /* 0 => */ "enumerated as 0",
+          /* 1 => */ "confidentiality & integrity protection",
+          /* 2 => */ "confidentiality protection only" };
 
    static named_item  names[]
       = { { "section property"                        ,  0,  3, props },
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 23);
+               /* max_len => */ 24);
 }
 
 static void
@@ -6243,6 +6761,9 @@ print_14_0_ebx(unsigned int  value)
           { "MTC timing packet; suppress COFI-based"  ,  3,  3, bools },
           { "PTWRITE support"                         ,  4,  4, bools },
           { "power event trace support"               ,  5,  5, bools },
+          { "PSB/PMI preservation support"            ,  6,  6, bools },
+          { "IA32_RTIT_CTL EventEn enable supported"  ,  7,  7, bools },
+          { "IA32_RTIT_CTL DisTNT disable supported"  ,  8,  8, bools },
         };
 
    print_names(value, names, LENGTH(names),
@@ -6358,7 +6879,7 @@ print_18_n_ebx(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 0);
+               /* max_len => */ 33);
 }
 
 static void
@@ -6379,7 +6900,7 @@ print_18_n_edx(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 0);
+               /* max_len => */ 33);
 }
 
 static void
@@ -6460,6 +6981,22 @@ print_1b_n_eax(unsigned int  value)
    static named_item  names[]
       = { { "sub-leaf type"                           ,  0, 11, types },
         };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 0);
+}
+
+static void
+print_1b_n_target(unsigned int  target,
+                  unsigned int  value)
+{
+   static ccstring targets[1<<12] = { /* 0 => */ "ignored (0)",    
+                                      /* 1 => */ "MKTME (1)" };
+
+   char  buf[128];
+   sprintf(buf, "identifier of target %u", target);
+
+   named_item  names[] = { { buf, 0, 31, targets } };
 
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
@@ -6576,6 +7113,28 @@ print_20_ebx(unsigned int  value)
 }
 
 static void
+print_23_3_eax(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "core cycles"                             ,  0,  0, bools },
+          { "instructions retired"                    ,  1,  1, bools },
+          { "reference cycles"                        ,  2,  2, bools },
+          { "last level cache references"             ,  3,  3, bools },
+          { "last level cache misses"                 ,  4,  4, bools },
+          { "branch instructions retired"             ,  5,  5, bools },
+          { "branch mispredicts retired"              ,  6,  6, bools },
+          { "topdown slots"                           ,  7,  7, bools },
+          { "topdown backend bound"                   ,  8,  8, bools },
+          { "topdown bad speculation"                 ,  9,  9, bools },
+          { "topdown frontend bound"                  , 10, 10, bools },
+          { "topdown retiring"                        , 11, 11, bools },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 0);
+}
+
+static void
 print_20000001_edx(unsigned int  value)
 {
    // I found a vague reference to this leaf in Intel Xeon Phi Coprocessor
@@ -6593,8 +7152,11 @@ print_20000001_edx(unsigned int  value)
 }
 
 static void
-print_40000001_eax_kvm(unsigned int  value)
+print_hypervisor_1_eax_kvm(unsigned int  reg,
+                           unsigned int  value)
 {
+   // See Linux Documentation/virt/kvm/x86/cpuid.rst.
+   
    static named_item  names[]
       = { { "kvmclock available at MSR 0x11"          ,  0,  0, bools },
           { "delays unnecessary for PIO ops"          ,  1,  1, bools },
@@ -6610,28 +7172,47 @@ print_40000001_eax_kvm(unsigned int  value)
           { "host HLT poll disable at MSR 0x4b564d05" , 12, 12, bools },
           { "guest sched yield optimization enabled"  , 13, 13, bools },
           { "guest uses intrs for page ready APF evs" , 14, 14, bools },
+          { "extended destination ID"                 , 15, 15, bools },
+          { "map gpa range hypercall supported"       , 16, 16, bools },
+          { "MSR_KVM_MIGRATION_CONTROL supported"     , 17, 17, bools },
           { "stable: no guest per-cpu warps expected" , 24, 24, bools },
         };
 
-   printf("   hypervisor features (0x40000001/eax):\n");
+   printf("   hypervisor features (0x%08x/eax):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000001_edx_kvm(unsigned int  value)
+print_hypervisor_1_edx_kvm(unsigned int  reg,
+                           unsigned int  value)
 {
    static named_item  names[]
       = { { "realtime hint: no unbound preemption"    ,  0,  0, bools },
         };
 
-   printf("   hypervisor features (0x40000001/edx):\n");
+   printf("   hypervisor features (0x%08x/edx):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000002_ecx_xen(unsigned int  value)
+print_hypervisor_1_eax_acrn(unsigned int  reg,
+                            unsigned int  value)
+{
+   // See Linux Documentation/virt/acrn/cpuid.rst.
+   
+   static named_item  names[]
+      = { { "guest VM is a privileged VM"             ,  0,  0, bools },
+        };
+
+   printf("   hypervisor features (0x%08x/eax):\n", reg);
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 0);
+}
+
+static void
+print_hypervisor_2_ecx_xen(unsigned int  value)
 {
    static named_item  names[]
       = { { "MMU_PT_UPDATE_PRESERVE_AD supported"     ,  0,  0, bools },
@@ -6642,7 +7223,7 @@ print_40000002_ecx_xen(unsigned int  value)
 }
 
 static void
-print_40000003_eax_xen(unsigned int  value)
+print_hypervisor_3_eax_xen(unsigned int  value)
 {
    static named_item  names[]
       = { { "vtsc"                                    ,  0,  0, bools },
@@ -6655,10 +7236,13 @@ print_40000003_eax_xen(unsigned int  value)
 }
 
 static void
-print_40000003_eax_microsoft(unsigned int  value)
+print_hypervisor_3_eax_microsoft(unsigned int  reg,
+                                 unsigned int  value)
 {
+   // Bits correspond to the HV_PARTITION_PRIVILEGE_MASK.
+   // See: https://docs.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/datatypes/hv_partition_privilege_mask
    static named_item  names[]
-      = { { "VP run time"                             ,  0,  0, bools },
+      = { { "VP run time"                             ,  0,  0, bools }, 
           { "partition reference counter"             ,  1,  1, bools },
           { "basic synIC MSRs"                        ,  2,  2, bools },
           { "synthetic timer MSRs"                    ,  3,  3, bools },
@@ -6671,16 +7255,18 @@ print_40000003_eax_microsoft(unsigned int  value)
           { "guest idle state MSR"                    , 10, 10, bools },
           { "TSC/APIC frequency MSRs"                 , 11, 11, bools },
           { "guest debugging MSRs"                    , 12, 12, bools },
+          { "reenlightenment MSRs"                    , 13, 13, bools },
+          { "invariant TSC MSR"                       , 15, 15, bools }, // LX*
         };
-        
 
-   printf("   hypervisor feature identification (0x40000003/eax):\n");
+   printf("   hypervisor feature identification (0x%08x/eax):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000003_ebx_microsoft(unsigned int  value)
+print_hypervisor_3_ebx_microsoft(unsigned int  reg,
+                                 unsigned int  value)
 {
    static named_item  names[]
       = { { "CreatePartitions"                        ,  0,  0, bools },
@@ -6699,27 +7285,34 @@ print_40000003_ebx_microsoft(unsigned int  value)
           { "AccessVpRegisters"                       , 17, 17, bools },
           { "EnableExtendedHypercalls"                , 20, 20, bools },
           { "StartVirtualProcessor"                   , 21, 21, bools },
+          { "Isolation"                               , 22, 22, bools }, // LX*
         };
 
-   printf("   hypervisor partition creation flags (0x40000003/ebx):\n");
+   printf("   hypervisor partition creation flags (0x%08x/ebx):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000003_ecx_microsoft(unsigned int  value)
+print_hypervisor_3_ecx_microsoft(unsigned int  reg,
+                                 unsigned int  value)
 {
    static named_item  names[]
       = { { "maximum process power state"             ,  0,  3, NIL_IMAGES },
+          { "invariant Mperf"                         ,  5,  5, bools },
+          { "supervisor shadow stack"                 ,  6,  6, bools },
+          { "architectural PMU"                       ,  7,  7, bools },
+          { "exception trap intercept"                ,  8,  8, bools },
         };
 
-   printf("   hypervisor power management features (0x40000003/ecx):\n");
+   printf("   hypervisor power management features (0x%08x/ecx):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000003_edx_microsoft(unsigned int  value)
+print_hypervisor_3_edx_microsoft(unsigned int  reg,
+                                 unsigned int  value)
 {
    static named_item  names[]
       = { { "MWAIT available"                         ,  0,  0, bools },
@@ -6741,15 +7334,20 @@ print_40000003_edx_microsoft(unsigned int  value)
           { "sint polling mode available"             , 17, 17, bools },
           { "hypercall MSR lock available"            , 18, 18, bools },
           { "use direct synthetic timers"             , 19, 19, bools },
+          { "VSM PAT register available"              , 20, 20, bools },
+          { "VSM bndcfgs register available"          , 21, 21, bools },
+          { "synthetic time unhalted timer available" , 23, 23, bools },
+          { "Intel LBR: last branch records supported", 26, 26, bools },
         };
 
-   printf("   hypervisor feature identification (0x40000003/edx):\n");
+   printf("   hypervisor feature identification (0x%08x/edx):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000004_eax_xen(unsigned int  value)
+print_hypervisor_4_eax_xen(unsigned int  reg,
+                           unsigned int  value)
 {
    static named_item  names[]
       = { { "virtualized APIC registers"              ,  0,  0, bools },
@@ -6757,15 +7355,17 @@ print_40000004_eax_xen(unsigned int  value)
           { "IOMMU mappings for other domain memory"  ,  2,  2, bools },
           { "vcpu id is valid"                        ,  3,  3, bools },
           { "domain id is valid"                      ,  4,  4, bools },
+          { "expanded destination id"                 ,  5,  5, bools },
+          { "upcalls with physical IRQ vectors"       ,  6,  6, bools },
         };
 
-   printf("   HVM-specific parameters (0x40000004):\n");
+   printf("   HVM-specific parameters (0x%08x):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 38);
 }
 
 static void
-print_40000004_eax_microsoft(unsigned int  value)
+print_hypervisor_4_eax_microsoft(unsigned int  value)
 {
    static named_item  names[]
       = { { "use hypercalls for AS switches"          ,  0,  0, bools },
@@ -6783,27 +7383,42 @@ print_40000004_eax_microsoft(unsigned int  value)
           { "hypervisor is nested with Hyper-V"       , 12, 12, bools },
           { "use INT for MBEC system calls"           , 13, 13, bools },
           { "use enlightened VMCS interface"          , 14, 14, bools },
+          { "use synced timeline"                     , 15, 15, bools },
+          { "use direct local flush entire"           , 17, 17, bools },
+          { "no non-architectural core sharing"       , 18, 18, bools },
         };
 
-   printf("   hypervisor recommendations (0x40000004/eax):\n");
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 0);
+               /* max_len => */ 41);
 }
 
 static void
-print_40000005_0_ebx_xen(unsigned int  value)
+print_hypervisor_4_ecx_microsoft(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "physical address width"                  ,  0,  6, NIL_IMAGES },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 41);
+}
+
+static void
+print_hypervisor_5_0_ebx_xen(unsigned int  reg,
+                             unsigned int  value)
 {
    static named_item  names[]
       = { { "maximum machine address width"           ,  0,  7, NIL_IMAGES },
         };
 
-   printf("   PV-specific parameters (0x40000005):\n");
+   printf("   PV-specific parameters (0x%08x):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000006_eax_microsoft(unsigned int  value)
+print_hypervisor_6_eax_microsoft(unsigned int  reg,
+                                 unsigned int  value)
 {
    static named_item  names[]
       = { { "APIC overlay assist"                     ,  0,  0, bools },
@@ -6816,27 +7431,39 @@ print_40000006_eax_microsoft(unsigned int  value)
           { "DMA protection"                          ,  7,  7, bools },
           { "HPET requested"                          ,  8,  8, bools },
           { "synthetic timers are volatile"           ,  9,  9, bools },
+          { "hypervisor level of current guest"       , 10, 13, NIL_IMAGES },
+          { "physical destination mode requested"     , 14, 14, bools },
+          { "hardware memory zeroing support"         , 16, 16, bools },
+          { "unrestricted guest support"              , 17, 17, bools },
+          { "resource allocation support"             , 18, 18, bools },
+          { "resource monitoring support"             , 19, 19, bools },
+          { "guest virtual PMU support"               , 20, 20, bools },
+          { "guest virtual LBR support"               , 21, 21, bools },
+          { "guest virtual IPT support"               , 22, 22, bools },
+          { "APIC emulation support"                  , 23, 23, bools },
+          { "ACPI WDAT table used by hypervisor"      , 24, 24, bools },
         };
 
-   printf("   hypervisor hardware features used (0x40000006/eax):\n");
+   printf("   hypervisor hardware features used (0x%08x/eax):\n", reg);
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
 
 static void
-print_40000007_eax_microsoft(unsigned int  value)
+print_hypervisor_7_eax_microsoft(unsigned int  value)
 {
    static named_item  names[]
       = { { "StartLogicalProcessor"                   ,  0,  0, bools },
           { "CreateRootvirtualProcessor"              ,  1,  1, bools },
+          { "PerformanceCounterSync"                  ,  2,  2, bools },
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 0);
+               /* max_len => */ 26);
 }
 
 static void
-print_40000007_ebx_microsoft(unsigned int  value)
+print_hypervisor_7_ebx_microsoft(unsigned int  value)
 {
    static named_item  names[]
       = { { "ProcessorPowerManagement"                ,  0,  0, bools },
@@ -6845,11 +7472,22 @@ print_40000007_ebx_microsoft(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 0);
+               /* max_len => */ 26);
 }
 
 static void
-print_40000008_eax_microsoft(unsigned int  value)
+print_hypervisor_7_ecx_microsoft(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "RemapGuestUncached"                      ,  0,  0, bools },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 26);
+}
+
+static void
+print_hypervisor_8_eax_microsoft(unsigned int  value)
 {
    static named_item  names[]
       = { { "SvmSupported"                            ,  0,  0, bools },
@@ -6861,7 +7499,7 @@ print_40000008_eax_microsoft(unsigned int  value)
 }
 
 static void
-print_40000009_eax_microsoft(unsigned int  value)
+print_hypervisor_9_eax_microsoft(unsigned int  value)
 {
    static named_item  names[]
       = { { "AccessSynicRegs"                         ,  2,  2, bools },
@@ -6872,11 +7510,11 @@ print_40000009_eax_microsoft(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 0);
+               /* max_len => */ 37);
 }
 
 static void
-print_40000009_edx_microsoft(unsigned int  value)
+print_hypervisor_9_edx_microsoft(unsigned int  value)
 {
    static named_item  names[]
       = { { "XmmRegistersForFastHypercallAvailable"   ,  4,  4, bools },
@@ -6885,11 +7523,11 @@ print_40000009_edx_microsoft(unsigned int  value)
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 0);
+               /* max_len => */ 37);
 }
 
 static void
-print_4000000a_eax_microsoft(unsigned int  value)
+print_hypervisor_a_eax_microsoft(unsigned int  value)
 {
    static named_item  names[]
       = { { "enlightened VMCS version (low)"          ,  0,  7, NIL_IMAGES },
@@ -6897,6 +7535,59 @@ print_4000000a_eax_microsoft(unsigned int  value)
           { "direct virtual flush hypercalls support" , 17, 17, bools },
           { "HvFlushGuestPhysicalAddress* hypercalls" , 18, 18, bools },
           { "enlightened MSR bitmap support"          , 19, 19, bools },
+          { "page fault combining virtual exceptions" , 20, 20, bools },
+          { "VMCS GuestIa32DebugCtl support"          , 21, 21, bools },
+          { "nested enlightened TLB flush support"    , 22, 22, bools },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 39);
+}
+
+static void
+print_hypervisor_a_ebx_microsoft(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "VMCS HvFlushGuestPhysicalAddress*"       ,  0,  0, bools },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 39);
+}
+
+static void
+print_hypervisor_c_eax_microsoft(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "paravisor present"                       ,  0,  0, bools }, // LX*
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 0);
+}
+
+static void
+print_hypervisor_c_ebx_microsoft(unsigned int  value)
+{
+   static ccstring isoltypes[1<<4] = { /* 0 => */ "none (0)",    
+                                       /* 1 => */ "VBS (1)",
+                                       /* 2 => */ "SNP (2)" };
+
+   static named_item  names[]
+      = { { "isolation type"                          ,  0,  3, isoltypes }, // LX*
+          { "shared GPA boundary active"              ,  5,  5, bools }, // LX*
+          { "shared GPA boundary bits"                ,  6, 11, NIL_IMAGES }, // LX*
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 0);
+}
+
+static void
+print_hypervisor_82_eax_microsoft(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "allow kernel debugging"                  ,  1,  1, bools }, // Qemu*
         };
 
    print_names(value, names, LENGTH(names),
@@ -7223,12 +7914,12 @@ print_80000001_ecx_amd(unsigned int  value)
           { "TBM support"                             , 21, 21, bools },
           { "topology extensions"                     , 22, 22, bools },
           { "core performance counter extensions"     , 23, 23, bools },
-          { "NB/DF performance counter extensions"    , 24, 24, bools }, // LX*/SKC*
+          { "NB/DF performance counter extensions"    , 24, 24, bools },
           { "data breakpoint extension"               , 26, 26, bools },
           { "performance time-stamp counter support"  , 27, 27, bools },
           { "LLC performance counter extensions"      , 28, 28, bools },
           { "MWAITX/MONITORX supported"               , 29, 29, bools },
-          { "Address mask extension support"          , 30, 30, bools }, // SKC*
+          { "Address mask extension support"          , 30, 30, bools },
         };
 
    print_names(value, names, LENGTH(names),
@@ -7288,8 +7979,8 @@ print_80000001_ebx_amd(unsigned int  value,
 {
    unsigned int  max_len = 0;
 
-   if (__F(val_1_eax) == _XF(0) + _F(15)
-       && __M(val_1_eax) < _XM(4) + _M(0)) {
+   if (MaskF(val_1_eax) == ShftXF(0) + ShftF(15)
+       && MaskM(val_1_eax) < ShftXM(4) + ShftM(0)) {
       static named_item  names[]
          = { { "raw"                                     ,  0, 31, NIL_IMAGES },
              { "BrandId"                                 ,  0, 16, NIL_IMAGES },
@@ -7300,8 +7991,8 @@ print_80000001_ebx_amd(unsigned int  value,
       printf("   extended brand id (0x80000001/ebx):\n");
       print_names(value, names, LENGTH(names),
                   /* max_len => */ 0);
-   } else if (__F(val_1_eax) == _XF(0) + _F(15)
-              && __M(val_1_eax) >= _XM(4) + _M(0)) {
+   } else if (MaskF(val_1_eax) == ShftXF(0) + ShftF(15)
+              && MaskM(val_1_eax) >= ShftXM(4) + ShftM(0)) {
       static named_item  names[]
          = { { "raw"                                     ,  0, 31, NIL_IMAGES },
              { "BrandId"                                 ,  0, 16, NIL_IMAGES },
@@ -7315,8 +8006,8 @@ print_80000001_ebx_amd(unsigned int  value,
       printf("   extended brand id (0x80000001/ebx):\n");
       print_names(value, names, LENGTH(names),
                   /* max_len => */ 0);
-   } else if (__F(val_1_eax) == _XF(1) + _F(15)
-              || __F(val_1_eax) == _XF(2) + _F(15)) {
+   } else if (MaskF(val_1_eax) == ShftXF(1) + ShftF(15)
+              || MaskF(val_1_eax) == ShftXF(2) + ShftF(15)) {
       static named_item  names[]
          = { { "raw"                                     ,  0, 31, NIL_IMAGES },
              { "BrandId"                                 ,  0, 15, NIL_IMAGES },
@@ -7349,10 +8040,10 @@ print_80000001_ebx_amd(unsigned int  value,
    // NOTE: AMD Family = XF + F,         e.g. 0x17 (17h) = 0xf + 0x8
    //       AMD Model  = (XM << 4) + M,  e.g. 0x18 (18h) = (0x1 << 4) + 0x8
    
-   if (__F(val_1_eax) >= _XF(1) + _F(15)) {
+   if (MaskF(val_1_eax) >= ShftXF(1) + ShftF(15)) {
       ccstring*  use_pkg_type = NIL_IMAGES;
 
-      if (__F(val_1_eax) == _XF(1) + _F(15)) {
+      if (MaskF(val_1_eax) == ShftXF(1) + ShftF(15)) {
          // Family 10h
          static ccstring  pkg_type[1<<4] = { "Fr2/Fr5/Fr6 (0)",
                                              "AM2r2/AM3 (1)",
@@ -7361,9 +8052,9 @@ print_80000001_ebx_amd(unsigned int  value,
                                              "ASB2 (4)",
                                              "C32 (5)" };
          use_pkg_type = pkg_type;
-      } else if (__F(val_1_eax) == _XF(6) + _F(15)) {
+      } else if (MaskF(val_1_eax) == ShftXF(6) + ShftF(15)) {
          // Family 15h
-         if (__M(val_1_eax) <= _XM(0) + _M(15)) {
+         if (MaskM(val_1_eax) <= ShftXM(0) + ShftM(15)) {
             static ccstring  pkg_type[1<<4] = { NULL,
                                                 "AM3r2 (1)",
                                                 NULL,
@@ -7371,27 +8062,27 @@ print_80000001_ebx_amd(unsigned int  value,
                                                 NULL,
                                                 "C32r1 (5)" };
             use_pkg_type = pkg_type;
-         } else if (__M(val_1_eax) >= _XM(1) + _M(0)
-                    && __M(val_1_eax) <= _XM(1) + _M(15)) {
+         } else if (MaskM(val_1_eax) >= ShftXM(1) + ShftM(0)
+                    && MaskM(val_1_eax) <= ShftXM(1) + ShftM(15)) {
             static ccstring  pkg_type[1<<4] = { "FP2 (BGA) (0)",
                                                 "FS1r2 (uPGA) (1)",
                                                 "FM2 (PGA) (2)" };
 
             use_pkg_type = pkg_type;
-         } else if (__M(val_1_eax) >= _XM(3) + _M(0)
-                    && __M(val_1_eax) <= _XM(3) + _M(15)) {
+         } else if (MaskM(val_1_eax) >= ShftXM(3) + ShftM(0)
+                    && MaskM(val_1_eax) <= ShftXM(3) + ShftM(15)) {
             static ccstring  pkg_type[1<<4] = { "FP3 (BGA) (0)",
                                                 "FM2r2 (uPGA) (1)" };
             use_pkg_type = pkg_type;
-         } else if (__M(val_1_eax) >= _XM(6) + _M(0)
-                    && __M(val_1_eax) <= _XM(6) + _M(15)) {
+         } else if (MaskM(val_1_eax) >= ShftXM(6) + ShftM(0)
+                    && MaskM(val_1_eax) <= ShftXM(6) + ShftM(15)) {
             static ccstring  pkg_type[1<<4] = { "FP4 (BGA) (0)",
                                                 NULL,
                                                 "AM4 (uPGA) (2)",
                                                 "FM2r2 (uPGA) (3)" };
             use_pkg_type = pkg_type;
-         } else if (__M(val_1_eax) >= _XM(7) + _M(0)
-                    && __M(val_1_eax) <= _XM(7) + _M(15)) {
+         } else if (MaskM(val_1_eax) >= ShftXM(7) + ShftM(0)
+                    && MaskM(val_1_eax) <= ShftXM(7) + ShftM(15)) {
             static ccstring  pkg_type[1<<4] = { "FP4 (BGA) (0)",
                                                 NULL,
                                                 "AM4 (uPGA) (2)",
@@ -7399,35 +8090,35 @@ print_80000001_ebx_amd(unsigned int  value,
                                                 "FT4 (BGA) (4)" };
             use_pkg_type = pkg_type;
          }
-      } else if (__F(val_1_eax) == _XF(7) + _F(15)) {
+      } else if (MaskF(val_1_eax) == ShftXF(7) + ShftF(15)) {
          // Family 16h
-         if (__M(val_1_eax) <= _XM(0) + _M(15)) {
+         if (MaskM(val_1_eax) <= ShftXM(0) + ShftM(15)) {
             static ccstring  pkg_type[1<<4] = { "FT3 (BGA) (0)",
                                                 "FS1b (1)" };
             use_pkg_type = pkg_type;
-         } else if (__M(val_1_eax) >= _XM(3) + _M(0)
-                    && __M(val_1_eax) <= _XM(3) + _M(15)) {
+         } else if (MaskM(val_1_eax) >= ShftXM(3) + ShftM(0)
+                    && MaskM(val_1_eax) <= ShftXM(3) + ShftM(15)) {
             static ccstring  pkg_type[1<<4] = { "FT3b (BGA) (0)",
                                                 NULL,
                                                 NULL,
                                                 "FP4 (3)" };
             use_pkg_type = pkg_type;
          }
-      } else if (__F(val_1_eax) == _XF(8) + _F(15)) {
+      } else if (MaskF(val_1_eax) == ShftXF(8) + ShftF(15)) {
          // Family 17h
-         if (__M(val_1_eax) == _XM(0) + _M(1)
-             || __M(val_1_eax) == _XM(0) + _M(8)) {
+         if (MaskM(val_1_eax) == ShftXM(0) + ShftM(1)
+             || MaskM(val_1_eax) == ShftXM(0) + ShftM(8)) {
             static ccstring  pkg_type[1<<4] = { NULL,
                                                 NULL,
                                                 "AM4 (2)" };
             use_pkg_type = pkg_type;
-         } else if (__M(val_1_eax) == _XM(1) + _M(8)
-                    || __M(val_1_eax) == _XM(2) + _M(0)) {
+         } else if (MaskM(val_1_eax) == ShftXM(1) + ShftM(8)
+                    || MaskM(val_1_eax) == ShftXM(2) + ShftM(0)) {
             static ccstring  pkg_type[1<<4] = { "FP5 (0)",
                                                 NULL,
                                                 "AM4 (2)" };
             use_pkg_type = pkg_type;
-         } else if (__M(val_1_eax) == _XM(7) + _M(1)) {
+         } else if (MaskM(val_1_eax) == ShftXM(7) + ShftM(1)) {
             static ccstring  pkg_type[1<<4] = { NULL,
                                                 NULL,
                                                 "AM4 (2)" };
@@ -7685,37 +8376,60 @@ print_80000008_eax(unsigned int  value)
 }
 
 static void
-print_80000008_ebx(unsigned int  value)
+print_80000008_ebx(unsigned int         value,
+                   const code_stash_t*  stash)
 {
    static named_item  names[]
       = { { "CLZERO instruction"                      ,  0,  0, bools },
           { "instructions retired count support"      ,  1,  1, bools },
           { "always save/restore error pointers"      ,  2,  2, bools },
+          { "INVLPGB instruction"                     ,  3,  3, bools },
           { "RDPRU instruction"                       ,  4,  4, bools },
-          { "memory bandwidth enforcement"            ,  6,  6, bools }, // SKC*
+          { "memory bandwidth enforcement"            ,  6,  6, bools },
+          { "MCOMMIT instruction"                     ,  8,  8, bools },
           { "WBNOINVD instruction"                    ,  9,  9, bools },
           { "IBPB: indirect branch prediction barrier", 12, 12, bools },
+          { "interruptible WBINVD, WBNOINVD"          , 13, 13, bools },
           { "IBRS: indirect branch restr speculation" , 14, 14, bools },
-          { "STIBP: 1 thr indirect branch predictor"  , 15, 15, bools }, // Qemu*
-          { "STIBP always on preferred mode"          , 17, 17, bools }, // LX*
+          { "STIBP: 1 thr indirect branch predictor"  , 15, 15, bools },
+          { "CPU prefers: IBRS always on"             , 16, 16, bools },
+          { "CPU prefers: STIBP always on"            , 17, 17, bools },
+          { "IBRS preferred over software solution"   , 18, 18, bools },
+          { "IBRS provides same mode protection"      , 19, 19, bools },
+          { "EFER[LMSLE] not supported"               , 20, 20, bools },
+          { "INVLPGB supports TLB flush guest nested" , 21, 21, bools },
           { "ppin processor id number supported"      , 23, 23, bools }, // Xen*
           { "SSBD: speculative store bypass disable"  , 24, 24, bools },
           { "virtualized SSBD"                        , 25, 25, bools },
           { "SSBD fixed in hardware"                  , 26, 26, bools },
+          { "CPPC: collaborative processor perf ctrl" , 27, 27, bools },
+          { "PSFD: predictive store forward disable"  , 28, 28, bools },
+          { "not vulnerable to branch type confusion" , 29, 29, bools },
+          { "branch sampling feature support"         , 31, 31, bools },
         };
 
    printf("   Extended Feature Extensions ID (0x80000008/ebx):\n");
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
+
+   boolean  not_vuln_BTC = (BIT_EXTRACT_LE(value, 29, 30)
+                            || Synth_Family(stash->val_80000001_eax) == 0x19);
+   printf("      (vuln to branch type confusion synth)    = %s\n",
+          bools[!not_vuln_BTC]);
 }
 
 static void
 print_80000008_ecx(unsigned int  value)
 {
+   static ccstring  tscSize[1<<2] = { "40 bits (0)",
+                                      "48 bits (1)",
+                                      "56 bits (2)",
+                                      "64 bits (3)" };
+
    static named_item  names[]
       = { // bit field 0, 7 is reported by caller
           { "ApicIdCoreIdSize"                        , 12, 15, NIL_IMAGES },
-          { "performance time-stamp counter size"     , 16, 17, NIL_IMAGES },
+          { "performance time-stamp counter size"     , 16, 17, tscSize },
         };
 
    print_names(value, names, LENGTH(names),
@@ -7726,7 +8440,8 @@ static void
 print_80000008_edx(unsigned int  value)
 {
    static named_item  names[]
-      = { { "RDPRU instruction max input support"     , 16, 23, NIL_IMAGES },
+      = { { "max page count for INVLPGB instruction"  ,  0, 15, NIL_IMAGES },
+          { "RDPRU instruction max input support"     , 16, 23, NIL_IMAGES },
         };
  
    printf("   Feature Extended Size (0x80000008/edx):\n");
@@ -7765,8 +8480,12 @@ print_8000000a_edx(unsigned int  value)
           { "virtualized VMLOAD/VMSAVE"               , 15, 15, bools },
           { "virtualized global interrupt flag (GIF)" , 16, 16, bools },
           { "GMET: guest mode execute trap"           , 17, 17, bools },
+          { "X2AVIC: virtualized X2APIC"              , 18, 18, bools }, // LX*
+          { "supervisor shadow stack"                 , 19, 19, bools },
           { "guest Spec_ctl support"                  , 20, 20, bools },
+          { "host MCE override"                       , 23, 23, bools },
           { "INVLPGB/TLBSYNC hyperv interc enable"    , 24, 24, bools },
+          { "guest SVME addr check"                   , 28, 28, bools }, // LX*, Qemu*
         };
 
    printf("   SVM Secure Virtual Machine (0x8000000a/edx):\n");
@@ -7820,7 +8539,7 @@ print_8000001a_eax(unsigned int  value)
           { "256-bit SSE executed full-width"         ,  2,  2, bools },
         };
 
-   printf("   SVM Secure Virtual Machine (0x8000001a/eax):\n");
+   printf("   Performance Optimization Identifiers (0x8000001a/eax):\n");
    print_names(value, names, LENGTH(names),
                /* max_len => */ 0);
 }
@@ -7858,6 +8577,8 @@ print_8000001c_eax(unsigned int  value)
           { "DC miss event"                           ,  4,  4, bools },
           { "core clocks not halted event"            ,  5,  5, bools },
           { "core reference clocks not halted event"  ,  6,  6, bools },
+          { "continuous mode sampling"                , 29, 29, bools },
+          { "tsc in event record"                     , 30, 30, bools },
           { "interrupt on threshold overflow"         , 31, 31, bools },
         };
 
@@ -7913,6 +8634,8 @@ print_8000001c_edx(unsigned int  value)
           { "DC miss event"                           ,  4,  4, bools },
           { "core clocks not halted event"            ,  5,  5, bools },
           { "core reference clocks not halted event"  ,  6,  6, bools },
+          { "continuous mode sampling"                , 29, 29, bools },
+          { "tsc in event record"                     , 30, 30, bools },
           { "interrupt on threshold overflow"         , 31, 31, bools },
         };
 
@@ -8042,12 +8765,16 @@ print_8000001f_eax(unsigned int  value)
           { "SEV-ES: SEV encrypted state support"     ,  3,  3, bools },
           { "SEV-SNP: SEV secure nested paging"       ,  4,  4, bools },
           { "VMPL: VM permission levels"              ,  5,  5, bools },
+          { "Secure TSC supported"                    ,  8,  8, bools },
+          { "virtual TSC_AUX supported"               ,  9,  9, bools }, // LX*
           { "hardware cache coher across enc domains" , 10, 10, bools },
           { "SEV guest exec only from 64-bit host"    , 11, 11, bools },
           { "restricted injection"                    , 12, 12, bools },
           { "alternate injection"                     , 13, 13, bools },
           { "full debug state swap for SEV-ES guests" , 14, 14, bools },
           { "disallowing IBS use by host"             , 15, 15, bools },
+          { "VTE: SEV virtual transparent encryption" , 16, 16, bools },
+          { "VMSA register protection"                , 24, 24, bools },
         };
 
    print_names(value, names, LENGTH(names),
@@ -8070,11 +8797,91 @@ static void
 print_80000020_0_ebx(unsigned int  value)
 {
    static named_item  names[]
-      = { { "memory bandwidth enforcement support"    ,  1,  1, bools },
+      = { { "L3 external bandwidth"                   ,  1,  1, bools },
+          { "L3 external slow memory bandwidth"       ,  2,  2, bools },
+          { "bandwidth monitoring event configuration",  3,  3, bools },
         };
 
    print_names(value, names, LENGTH(names),
-               /* max_len => */ 36);
+               /* max_len => */ 0);
+}
+
+static void
+print_80000020_3_ebx(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "number of bandwidth events available"    ,  0,  7, NIL_IMAGES },
+        };
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 38);
+}
+ 
+static void
+print_80000020_3_ecx(unsigned int  value)
+{
+   static named_item  names[]
+      = { { "reads to local NUMA"                     ,  0,  0, bools },
+          { "reads to non-local NUMA"                 ,  1,  1, bools },
+          { "non-temporal writes to local NUMA"       ,  2,  2, bools },
+          { "non-temporal writes to non-local NUMA"   ,  3,  3, bools },
+          { "reads to slow memory in local NUMA"      ,  4,  4, bools },
+          { "reads to slow memory in non-local NUMA"  ,  5,  5, bools },
+          { "dirty victims from QoS"                  ,  6,  6, bools },
+        };
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 38);
+}
+ 
+static void
+print_80000021_eax(unsigned int value)
+{
+   static named_item names[]
+      = { { "no nested data-breakpoints"              ,  0,  0, bools },
+          { "LFENCE always serializing"               ,  2,  2, bools },
+          { "SMM paging configuration lock support"   ,  3,  3, bools },
+          { "null selector clears base"               ,  6,  6, bools },
+          { "upper address ignore support"            ,  7,  7, bools },
+          { "SMM_CTL MSR not supported"               ,  9,  9, bools },
+          { "prefetch control MSR support"            , 13, 13, bools },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 0);
+}
+
+static void
+print_80000021_ebx(unsigned int value)
+{
+   unsigned int  ups = BIT_EXTRACT_LE(value, 0, 11) * 16;
+   printf("      microcode patch size                  = ");
+   if (ups == 0) {
+      printf("<= 0x15c0 (5568) (legacy value)\n");
+   } else {
+      printf("%u (0x%0x)\n", ups, ups);
+   }
+}
+
+static void
+print_80000022_eax(unsigned int value)
+{
+   static named_item names[]
+      = { { "AMD performance monitoring V2"           ,  0,  0, bools }, // LX*
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 37);
+}
+
+static void
+print_80000022_ebx(unsigned int value)
+{
+   static named_item names[]
+      = { { "number of core perf ctrs"                ,  0,  3, NIL_IMAGES },
+          { "number of avail Northbridge perf ctrs"   , 10, 15, NIL_IMAGES },
+        };
+
+   print_names(value, names, LENGTH(names),
+               /* max_len => */ 37);
 }
 
 static void
@@ -8422,6 +9229,9 @@ explain_dev_cpu_errno(void)
 }
 #endif
 
+#define IS_HYPERVISOR_LEAF(reg, want)        \
+   (0x4000000 <= (reg) && (reg) < 0x40010000 && ((reg) & 0xff) == (want))
+
 #define FOUR_CHARS_VALUE(s) \
    ((unsigned int)((s)[0] + ((s)[1] << 8) + ((s)[2] << 16) + ((s)[3] << 24)))
 #define IS_VENDOR_ID(words, s)                        \
@@ -8432,6 +9242,39 @@ explain_dev_cpu_errno(void)
    (   (words)[WORD_EBX] == FOUR_CHARS_VALUE(&(s)[0]) \
     && (words)[WORD_ECX] == FOUR_CHARS_VALUE(&(s)[4]) \
     && (words)[WORD_EDX] == FOUR_CHARS_VALUE(&(s)[8]))
+
+static hypervisor_t
+get_hypervisor (const unsigned int  words[WORD_NUM])
+{
+   if (IS_HYPERVISOR_ID(words, "VMwareVMware")) {
+      return HYPERVISOR_VMWARE;
+   } else if (IS_HYPERVISOR_ID(words, "XenVMMXenVMM")) {
+      return HYPERVISOR_XEN;
+   } else if (IS_HYPERVISOR_ID(words, "KVMKVMKVM\0\0\0")) {
+      return HYPERVISOR_KVM;
+   } else if (IS_HYPERVISOR_ID(words, "Microsoft Hv")) {
+      return HYPERVISOR_MICROSOFT;
+   } else if (IS_HYPERVISOR_ID(words, "ACRNACRNACRN")) {
+      return HYPERVISOR_ACRN;
+   } else {
+      return HYPERVISOR_UNKNOWN;
+   }
+}
+
+static void
+print_esc_substring (const char*   str,
+                     unsigned int  len)
+{
+   unsigned int  i = 0;
+   for (; i < len; i++) {
+      unsigned char  c = ((const unsigned char*)str)[i];
+      if (isgraph(c) || (c) == ' ') {
+         putchar(c);
+      } else {
+         printf("\\%o", c);
+      }
+   }
+}
 
 static void
 print_reg_raw (unsigned int        reg,
@@ -8510,16 +9353,8 @@ print_reg (unsigned int        reg,
       if (try < LENGTH(stash->val_1f_ecx)) {
          stash->val_1f_ecx[try] = words[WORD_ECX];
       }
-   } else if (reg == 0x40000000) {
-      if (IS_HYPERVISOR_ID(words, "VMwareVMware")) {
-         stash->hypervisor = HYPERVISOR_VMWARE;
-      } else if (IS_HYPERVISOR_ID(words, "XenVMMXenVMM")) {
-         stash->hypervisor = HYPERVISOR_XEN;
-      } else if (IS_HYPERVISOR_ID(words, "KVMKVMKVM\0\0\0")) {
-         stash->hypervisor = HYPERVISOR_KVM;
-      } else if (IS_HYPERVISOR_ID(words, "Microsoft Hv")) {
-         stash->hypervisor = HYPERVISOR_MICROSOFT;
-      }
+   } else if (IS_HYPERVISOR_LEAF(reg, 0)) {
+      stash->hypervisor = get_hypervisor(words);
    } else if (reg == 0x80000008) {
       stash->val_80000008_ecx = words[WORD_ECX];
    } else if (reg == 0x8000001e) {
@@ -8550,6 +9385,9 @@ print_reg (unsigned int        reg,
       print_1_edx(words[WORD_EDX]);
       print_1_ecx(words[WORD_ECX]);
    } else if (reg == 2) {
+      if (try == 0) {
+         printf("   cache and TLB information (2):\n");
+      }
       unsigned int  word = 0;
       for (; word < 4; word++) {
          if ((words[word] & 0x80000000) == 0) {
@@ -8569,14 +9407,22 @@ print_reg (unsigned int        reg,
              words[WORD_EDX] >> 16, words[WORD_EDX] & 0xffff, 
              words[WORD_ECX] >> 16, words[WORD_ECX] & 0xffff);
    } else if (reg == 4) {
+      if (try == 0) {
+         printf("   deterministic cache parameters (4):\n");
+      }
       printf("      --- cache %d ---\n", try);
-      print_4_eax(words[WORD_EAX]);
-      print_4_ebx(words[WORD_EBX]);
-      print_4_ecx(words[WORD_ECX]);
-      print_4_edx(words[WORD_EDX]);
-      printf("      number of sets (s)                   = %llu\n",
-             (unsigned long long)words[WORD_ECX] + 1ULL);
-      print_4_synth(words);
+      if ((words[WORD_EAX] & 0x1f) == 0) {
+         printf("      cache type                         = "
+                "no more caches (0)\n");
+      } else {
+         print_4_eax(words[WORD_EAX]);
+         print_4_ebx(words[WORD_EBX]);
+         print_4_ecx(words[WORD_ECX]);
+         print_4_edx(words[WORD_EDX]);
+         printf("      number of sets (s)                 = %llu\n",
+                (unsigned long long)words[WORD_ECX] + 1ULL);
+         print_4_synth(words);
+      }
    } else if (reg == 5) {
       printf("   MONITOR/MWAIT (5):\n");
       print_5_eax(words[WORD_EAX]);
@@ -8591,11 +9437,16 @@ print_reg (unsigned int        reg,
       print_6_edx(words[WORD_EDX]);
    } else if (reg == 7) {
       if (try == 0) {
+         printf("   extended feature flags (7):\n");
          print_7_0_ebx(words[WORD_EBX]);
          print_7_0_ecx(words[WORD_ECX]);
          print_7_0_edx(words[WORD_EDX]);
       } else if (try == 1) {
          print_7_1_eax(words[WORD_EAX]);
+         print_7_1_ebx(words[WORD_EBX]);
+         print_7_1_edx(words[WORD_EDX]);
+      } else if (try == 2) {
+         print_7_2_edx(words[WORD_EDX]);
       } else {
          /* Reserved: DO NOTHING */
       }
@@ -8607,11 +9458,12 @@ print_reg (unsigned int        reg,
    } else if (reg == 0xa) {
       printf("   Architecture Performance Monitoring Features (0xa):\n");
       print_a_eax(words[WORD_EAX]);
-      print_a_ebx(words[WORD_EBX]);
+      print_a_ebx(words[WORD_EBX], words[WORD_EAX]);
       print_a_ecx(words[WORD_ECX]);
       print_a_edx(words[WORD_EDX]);
    } else if (reg == 0xb) {
       if (try == 0) {
+         printf("   x2APIC features / processor topology (0xb):\n");
          // This is invariant across subleaves, so print it only once
          printf("      extended APIC ID                      = %u\n",
                 words[WORD_EDX]);
@@ -8625,11 +9477,10 @@ print_reg (unsigned int        reg,
    } else if (reg == 0xd) {
       if (try == 0) {
          printf("   XSAVE features (0xd/0):\n");
-         printf("      XCR0 lower 32 bits valid bit field mask = 0x%08x\n",
-                words[WORD_EAX]);
-         printf("      XCR0 upper 32 bits valid bit field mask = 0x%08x\n",
-                words[WORD_EDX]);
+         printf("      XCR0 valid bit field mask               = 0x%08x%08x\n",
+                words[WORD_EDX], words[WORD_EAX]);
          print_d_0_eax(words[WORD_EAX]);
+         print_d_0_edx(words[WORD_EDX]);
          // No bits current are defined in d_0_edx
          printf("      bytes required by fields in XCR0        = 0x%08x (%u)\n",
                 words[WORD_EBX], words[WORD_EBX]);
@@ -8667,7 +9518,7 @@ print_reg (unsigned int        reg,
                 words[WORD_ECX]);
          printf("      Counter width                               = %u\n",
                 24 + BIT_EXTRACT_LE(words[WORD_EAX], 0, 8));
-         print_f_1_eax(words[WORD_EAX]);
+         print_f_1_eax(words[WORD_EAX], stash);
          print_f_1_edx(words[WORD_EDX]);
       } else {
          print_reg_raw(reg, try, words);
@@ -8702,20 +9553,32 @@ print_reg (unsigned int        reg,
          print_12_0_ebx(words[WORD_EBX]);
          print_12_0_edx(words[WORD_EDX]);
       } else if (try == 1) {
-         printf("   SGX attributes (0x12/1):\n");
-         printf("      ECREATE SECS.ATTRIBUTES valid bit mask ="
-                " 0x%08x%08x%08x%08x\n",
+         printf("   SGX attributes: ECREATE SECS.ATTRIBUTES (0x12/1):\n");
+         printf("      valid bit mask = 0x%08x%08x%08x%08x\n",
                 words[WORD_EDX],
                 words[WORD_ECX],
                 words[WORD_EBX],
                 words[WORD_EAX]);
+         print_12_1_eax(words[WORD_EAX]);
+         print_12_1_ebx(words[WORD_EBX]);
+         printf("      XFRM: XSAVE feature request mask       = 0x%08x%08x\n",
+                words[WORD_EDX],
+                words[WORD_ECX]);
+         print_12_1_ecx(words[WORD_ECX]);
+         print_12_1_edx(words[WORD_EDX]);
       } else {
-         if ((words[WORD_EAX] & 0xf) == 1) {
-            printf("   SGX EPC enumeration (0x12/n):\n");
+         if ((words[WORD_EAX] & 0xf) == 0) {
+            printf("   SGX Enclave Page Cache (EPC) enumeration (0x12/0x%x):\n",
+                   try);
+            print_12_n_eax(words[WORD_EAX], /* max_len => */ 0);
+         } else if ((words[WORD_EAX] & 0xf) == 1) {
+            printf("   SGX Enclave Page Cache (EPC) enumeration (0x12/0x%x):\n",
+                   try);
+            print_12_n_eax(words[WORD_EAX], /* max_len => */ 24);
             printf("      section physical address = 0x%08x%08x\n",
-                   words[WORD_EBX], words[WORD_EAX] & 0xfffff000);
+                   words[WORD_EBX] & 0xfffff, words[WORD_EAX] & 0xfffff000);
             printf("      section size             = 0x%08x%08x\n",
-                   words[WORD_EDX], words[WORD_ECX] & 0xfffff000);
+                   words[WORD_EDX] & 0xfffff, words[WORD_ECX] & 0xfffff000);
             print_12_n_ecx(words[WORD_ECX]);
          } else {
             print_reg_raw(reg, try, words);
@@ -8764,7 +9627,7 @@ print_reg (unsigned int        reg,
       printf("   Deterministic Address Translation Parameters (0x18/%d):\n",
              try);
       print_18_n_ebx(words[WORD_EBX]);
-      printf("      number of sets = 0x%08x (%u)\n",
+      printf("      number of sets                    = 0x%08x (%u)\n",
              words[WORD_ECX], words[WORD_ECX]);
       print_18_n_edx(words[WORD_EDX]);
    } else if (reg == 0x19) {
@@ -8776,14 +9639,13 @@ print_reg (unsigned int        reg,
       printf("   Hybrid Information (0x1a/0):\n");
       print_1a_0_eax(words[WORD_EAX]);
    } else if (reg == 0x1b) {
-      printf("   PCONFIG information (0x1b/n):\n");
+      printf("   PCONFIG information (0x1b/0x%x):\n", try);
       print_1b_n_eax(words[WORD_EAX]);
-      printf("      identifier of target %d = 0x%08x (%u)\n",
-             3 * try + 1, words[WORD_EBX], words[WORD_EBX]);
-      printf("      identifier of target %d = 0x%08x (%u)\n",
-             3 * try + 2, words[WORD_ECX], words[WORD_ECX]);
-      printf("      identifier of target %d = 0x%08x (%u)\n",
-             3 * try + 3, words[WORD_EDX], words[WORD_EDX]);
+      if ((words[WORD_EAX] & 0xfff) != 0) {
+         print_1b_n_target(3 * try + 1, words[WORD_EBX]);
+         print_1b_n_target(3 * try + 2, words[WORD_ECX]);
+         print_1b_n_target(3 * try + 3, words[WORD_EDX]);
+      }
    } else if (reg == 0x1c) {
       printf("   Architectural LBR Capabilities (0x1c/0):\n");
       print_1c_eax(words[WORD_EAX]);
@@ -8791,6 +9653,7 @@ print_reg (unsigned int        reg,
       print_1c_ecx(words[WORD_ECX]);
    } else if (reg == 0x1d) {
       if (try == 0) {
+         printf("   Tile Information (0x1d/0):\n");
          printf("      max_palette = %u\n", words[WORD_EAX]);
       } else {
          printf("      --- palette %d ---\n", try);
@@ -8803,6 +9666,7 @@ print_reg (unsigned int        reg,
       print_1e_ebx(words[WORD_EBX]);
    } else if (reg == 0x1f) {
       if (try == 0) {
+         printf("   V2 extended topology (0x1f):\n");
          // This is invariant across subleaves, so print it only once
          printf("      x2APIC ID of logical processor = 0x%x (%u)\n",
                 words[WORD_EDX], words[WORD_EDX]);
@@ -8813,7 +9677,35 @@ print_reg (unsigned int        reg,
       print_b_1f_ebx(words[WORD_EBX]);
    } else if (reg == 0x20) {
       if (try == 0) {
+         printf("   Processor History Reset information (0x20):\n");
          print_20_ebx(words[WORD_EBX]);
+      } else {
+         print_reg_raw(reg, try, words);
+      }
+   } else if (reg == 0x21) {
+      printf("   tdx_guest_id = ");
+      if (words[WORD_EBX] > 0 && words[WORD_EDX] > 0 && words[WORD_ECX] > 0) {
+         printf("\"%-4.4s%-4.4s%-4.4s\"\n",
+                (const char*)&words[WORD_EBX], 
+                (const char*)&words[WORD_EDX], 
+                (const char*)&words[WORD_ECX]);
+      } else {
+         printf("none\n");
+      }
+   } else if (reg == 0x23) {
+      if (try == 0) {
+         printf("   Architecture Performance Monitoring Extended (0x23):\n");
+      } else if (try == 1) {
+         printf("      general counters bitmap      = 0x%0llx\n",
+                (unsigned long long)words[WORD_EAX]);
+         printf("      fixed counters bitmap        = 0x%0llx\n",
+                (unsigned long long)words[WORD_EBX]);
+      } else if (try == 2) {
+         // All reserved
+      } else if (try == 3) {
+         printf("   Architecture Performance Monitoring Extended Supported Events"
+                " (0x23/3):\n");
+         print_23_3_eax(words[WORD_EAX]);
       } else {
          print_reg_raw(reg, try, words);
       }
@@ -8821,55 +9713,41 @@ print_reg (unsigned int        reg,
       // max already set to words[WORD_EAX]
    } else if (reg == 0x20000001) {
       print_20000001_edx(words[WORD_EDX]);
-   } else if (reg == 0x40000000) {
-      // max already set to words[WORD_EAX]
-      printf("   hypervisor_id = \"%-4.4s%-4.4s%-4.4s\"\n",
-             (const char*)&words[WORD_EBX], 
-             (const char*)&words[WORD_ECX], 
-             (const char*)&words[WORD_EDX]);
-   } else if (reg == 0x40000001 && stash->hypervisor == HYPERVISOR_XEN) {
-      printf("   hypervisor version (0x40000001/eax):\n");
-      printf("      version = %d.%d\n", 
+   } else if (IS_HYPERVISOR_LEAF(reg, 0)) {
+      printf("   hypervisor_id (0x%08x) = \"", reg);
+      print_esc_substring((const char*)&words[WORD_EBX], sizeof(words[0]));
+      print_esc_substring((const char*)&words[WORD_ECX], sizeof(words[0]));
+      print_esc_substring((const char*)&words[WORD_EDX], sizeof(words[0]));
+      printf("\"\n");
+   } else if (IS_HYPERVISOR_LEAF(reg, 1)
+              && stash->hypervisor == HYPERVISOR_XEN) {
+      printf("   hypervisor version (0x%08x/eax):\n", reg);
+      printf("      version = %d.%d\n",
              BIT_EXTRACT_LE(words[WORD_EAX], 16, 32),
              BIT_EXTRACT_LE(words[WORD_EAX],  0, 16));
-   } else if (reg == 0x40000001 && stash->hypervisor == HYPERVISOR_KVM) {
-      print_40000001_eax_kvm(words[WORD_EAX]);
-      print_40000001_edx_kvm(words[WORD_EAX]);
-   } else if (reg == 0x40000001 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      printf("   hypervisor interface identification (0x40000001/eax):\n");
+   } else if (IS_HYPERVISOR_LEAF(reg, 1)
+              && stash->hypervisor == HYPERVISOR_KVM) {
+      print_hypervisor_1_eax_kvm(reg, words[WORD_EAX]);
+      print_hypervisor_1_edx_kvm(reg, words[WORD_EDX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 1)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor interface identification (0x%08x/eax):\n", reg);
       printf("      version = \"%-4.4s\"\n",
              (const char*)&words[WORD_EAX]);
-   } else if (reg == 0x40000002 && stash->hypervisor == HYPERVISOR_XEN) {
-      printf("   hypervisor features (0x40000002):\n");
+   } else if (IS_HYPERVISOR_LEAF(reg, 1)
+              && stash->hypervisor == HYPERVISOR_ACRN) {
+      print_hypervisor_1_eax_acrn(reg, words[WORD_EAX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 2)
+              && stash->hypervisor == HYPERVISOR_XEN) {
+      printf("   hypervisor features (0x%08x):\n", reg);
       printf("      number of hypercall-transfer pages = 0x%0x (%u)\n",
              words[WORD_EAX], words[WORD_EAX]);
       printf("      MSR base address                   = 0x%0x\n",
              words[WORD_EBX]);
-      print_40000002_ecx_xen(words[WORD_ECX]);
-   } else if (reg == 0x40000003 && stash->hypervisor == HYPERVISOR_XEN
-              && try == 0) {
-      print_40000003_eax_xen(words[WORD_EAX]);
-      printf("      tsc mode            = 0x%0x (%u)\n",
-             words[WORD_EBX], words[WORD_EBX]);
-      printf("      tsc frequency (kHz) = %u\n",
-             words[WORD_ECX]);
-      printf("      incarnation         = 0x%0x (%u)\n",
-             words[WORD_EDX], words[WORD_EDX]);
-   } else if (reg == 0x40000003 && stash->hypervisor == HYPERVISOR_XEN
-              && try == 1) {
-      unsigned long long  vtsc_offset
-         = ((unsigned long long)words[WORD_EAX]
-            + ((unsigned long long)words[WORD_EBX] << 32));
-      printf("      vtsc offset   = 0x%0llx (%llu)\n", vtsc_offset, vtsc_offset);
-      printf("      vtsc mul_frac = 0x%0x (%u)\n",
-             words[WORD_ECX], words[WORD_ECX]);
-      printf("      vtsc shift    = 0x%0x (%u)\n",
-             words[WORD_EDX], words[WORD_EDX]);
-   } else if (reg == 0x40000003 && stash->hypervisor == HYPERVISOR_XEN
-              && try == 2) {
-      printf("      cpu frequency (kHZ) = %u\n", words[WORD_EAX]);
-   } else if (reg == 0x40000002 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      printf("   hypervisor system identity (0x40000002):\n");
+      print_hypervisor_2_ecx_xen(words[WORD_ECX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 2)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor system identity (0x%08x):\n", reg);
       printf("      build          = %d\n", words[WORD_EAX]);
       printf("      version        = %d.%d\n",
              BIT_EXTRACT_LE(words[WORD_EBX], 16, 32),
@@ -8879,26 +9757,53 @@ print_reg (unsigned int        reg,
              BIT_EXTRACT_LE(words[WORD_EDX], 24, 32));
       printf("      service number = %d\n",
              BIT_EXTRACT_LE(words[WORD_EDX],  0, 24));
-   } else if (reg == 0x40000003 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      print_40000003_eax_microsoft(words[WORD_EAX]);
-      print_40000003_ebx_microsoft(words[WORD_EBX]);
-      print_40000003_ecx_microsoft(words[WORD_ECX]);
-      print_40000003_edx_microsoft(words[WORD_EDX]);
-   } else if (reg == 0x40000004 && stash->hypervisor == HYPERVISOR_XEN) {
-      print_40000004_eax_xen(words[WORD_EAX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 3) && stash->hypervisor == HYPERVISOR_XEN
+              && try == 0) {
+      printf("   hypervisor time features (0x%08x/00):\n", reg);
+      print_hypervisor_3_eax_xen(words[WORD_EAX]);
+      printf("      tsc mode            = 0x%0x (%u)\n",
+             words[WORD_EBX], words[WORD_EBX]);
+      printf("      tsc frequency (kHz) = %u\n",
+             words[WORD_ECX]);
+      printf("      incarnation         = 0x%0x (%u)\n",
+             words[WORD_EDX], words[WORD_EDX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 3) && stash->hypervisor == HYPERVISOR_XEN
+              && try == 1) {
+      printf("   hypervisor time scale & offset (0x%08x/01):\n", reg);
+      unsigned long long  vtsc_offset
+         = ((unsigned long long)words[WORD_EAX]
+            + ((unsigned long long)words[WORD_EBX] << 32));
+      printf("      vtsc offset   = 0x%0llx (%llu)\n", vtsc_offset, vtsc_offset);
+      printf("      vtsc mul_frac = 0x%0x (%u)\n",
+             words[WORD_ECX], words[WORD_ECX]);
+      printf("      vtsc shift    = 0x%0x (%u)\n",
+             words[WORD_EDX], words[WORD_EDX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 3) && stash->hypervisor == HYPERVISOR_XEN
+              && try == 2) {
+      printf("   hypervisor time physical cpu frequency (0x%08x/02):\n", reg);
+      printf("      cpu frequency (kHZ) = %u\n", words[WORD_EAX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 3) && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      print_hypervisor_3_eax_microsoft(reg, words[WORD_EAX]);
+      print_hypervisor_3_ebx_microsoft(reg, words[WORD_EBX]);
+      print_hypervisor_3_ecx_microsoft(reg, words[WORD_ECX]);
+      print_hypervisor_3_edx_microsoft(reg, words[WORD_EDX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 4) && stash->hypervisor == HYPERVISOR_XEN) {
+      print_hypervisor_4_eax_xen(reg, words[WORD_EAX]);
       printf("      vcpu id                                = 0x%x (%u)\n",
              words[WORD_EBX], words[WORD_EBX]);
       printf("      domain id                              = 0x%x (%u)\n",
              words[WORD_ECX], words[WORD_ECX]);
-   } else if (reg == 0x40000004 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      print_40000004_eax_microsoft(words[WORD_EAX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 4) && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor recommendations (0x%08x/eax):\n", reg);
+      print_hypervisor_4_eax_microsoft(words[WORD_EAX]);
+      print_hypervisor_4_ecx_microsoft(words[WORD_ECX]);
       printf("      maximum number of spinlock retry attempts = 0x%0x (%u)\n",
              words[WORD_EBX], words[WORD_EBX]);
-   } else if (reg == 0x40000005 && stash->hypervisor == HYPERVISOR_XEN
+   } else if (IS_HYPERVISOR_LEAF(reg, 5) && stash->hypervisor == HYPERVISOR_XEN
               && try == 0) {
-      print_40000005_0_ebx_xen(words[WORD_EBX]);
-   } else if (reg == 0x40000005 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      printf("   hypervisor implementation limits (0x40000005):\n");
+      print_hypervisor_5_0_ebx_xen(reg, words[WORD_EBX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 5) && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor implementation limits (0x%08x):\n", reg);
       printf("      maximum number of virtual processors                      "
              " = 0x%0x (%u)\n",
              words[WORD_EAX], words[WORD_EAX]);
@@ -8908,26 +9813,60 @@ print_reg (unsigned int        reg,
       printf("      maximum number of physical interrupt vectors for remapping"
              " = 0x%0x (%u)\n",
              words[WORD_ECX], words[WORD_ECX]);
-   } else if (reg == 0x40000006 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      print_40000006_eax_microsoft(words[WORD_EAX]);
-   } else if (reg == 0x40000007 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      printf("   hypervisor root partition enlightenments (0x40000007):\n");
-      print_40000007_eax_microsoft(words[WORD_EAX]);
-      print_40000007_ebx_microsoft(words[WORD_EBX]);
-   } else if (reg == 0x40000008 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      printf("   hypervisor shared virtual memory (0x40000008):\n");
-      print_40000008_eax_microsoft(words[WORD_EAX]);
-   } else if (reg == 0x40000009 && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      printf("   hypervisor nested hypervisor features (0x40000009):\n");
-      print_40000009_eax_microsoft(words[WORD_EAX]);
-      print_40000009_edx_microsoft(words[WORD_EAX]);
-   } else if (reg == 0x4000000a && stash->hypervisor == HYPERVISOR_MICROSOFT) {
-      printf("   hypervisor nested virtualization features (0x4000000a):\n");
-      print_4000000a_eax_microsoft(words[WORD_EAX]);
-   } else if (reg == 0x40000010) {
-      printf("   hypervisor generic timing information (0x40000010):\n");
+   } else if (IS_HYPERVISOR_LEAF(reg, 6)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      print_hypervisor_6_eax_microsoft(reg, words[WORD_EAX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 7)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor root partition enlightenments (0x%08x):\n", reg);
+      print_hypervisor_7_eax_microsoft(words[WORD_EAX]);
+      print_hypervisor_7_ebx_microsoft(words[WORD_EBX]);
+      print_hypervisor_7_ecx_microsoft(words[WORD_ECX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 8)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor shared virtual memory (0x%08x):\n", reg);
+      print_hypervisor_8_eax_microsoft(words[WORD_EAX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 9)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor nested hypervisor features (0x%08x):\n", reg);
+      print_hypervisor_9_eax_microsoft(words[WORD_EAX]);
+      print_hypervisor_9_edx_microsoft(words[WORD_EDX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 0xa)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor nested virtualization features (0x%08x):\n", reg);
+      print_hypervisor_a_eax_microsoft(words[WORD_EAX]);
+      print_hypervisor_a_ebx_microsoft(words[WORD_EBX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 0xc)
+              && stash->hypervisor == HYPERVISOR_MICROSOFT) {
+      printf("   hypervisor isolation configuration (0x%08x):\n", reg);
+      print_hypervisor_c_eax_microsoft(words[WORD_EAX]);
+      print_hypervisor_c_ebx_microsoft(words[WORD_EBX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 0x10)) {
+      printf("   hypervisor generic timing information (0x%08x):\n", reg);
       printf("      TSC frequency (Hz) = %d\n", words[WORD_EAX]);
       printf("      bus frequency (Hz) = %d\n", words[WORD_EBX]);
+   } else if (IS_HYPERVISOR_LEAF(reg, 0x80)) {
+      printf("   hypervisor synthetic debugger id = ");
+      if (words[WORD_EBX] > 0 && words[WORD_EDX] > 0 && words[WORD_ECX] > 0) {
+         printf("\"%-4.4s%-4.4s%-4.4s\"\n",
+                (const char*)&words[WORD_EBX], 
+                (const char*)&words[WORD_EDX], 
+                (const char*)&words[WORD_ECX]);
+      } else {
+         printf("none\n");
+      }
+   } else if (IS_HYPERVISOR_LEAF(reg, 0x81)) {
+      printf("   hypervisor synthetic debugger interface = ");
+      if (words[WORD_EAX] > 0) {
+         printf("\"%-4.4s\"\n",
+                (const char*)&words[WORD_EAX]);
+      } else {
+         printf("none\n");
+      }
+   } else if (IS_HYPERVISOR_LEAF(reg, 0x82)) {
+      printf("   hypervisor synthetic debugger platform capabilities"
+             " (0x%08x):\n", reg);
+      print_hypervisor_82_eax_microsoft(words[WORD_EAX]);
    } else if (reg == 0x80000000) {
       // max already set to words[WORD_EAX]
    } else if (reg == 0x80000001) {
@@ -8962,7 +9901,7 @@ print_reg (unsigned int        reg,
       print_80000007_edx(words[WORD_EDX]);
    } else if (reg == 0x80000008) {
       print_80000008_eax(words[WORD_EAX]);
-      print_80000008_ebx(words[WORD_EBX]);
+      print_80000008_ebx(words[WORD_EBX], stash);
       printf("   Size Identifiers (0x80000008/ecx):\n");
       unsigned int  num_thrs = BIT_EXTRACT_LE(stash->val_80000008_ecx, 0, 8);
       if (Synth_Family(stash->val_80000001_eax) > 0x16) {
@@ -8997,6 +9936,9 @@ print_reg (unsigned int        reg,
       print_8000001c_ebx(words[WORD_EBX]);
       print_8000001c_ecx(words[WORD_ECX]);
    } else if (reg == 0x8000001d) {
+      if (try == 0) {
+         printf("   Cache Properties (0x8000001d):\n");
+      }
       printf("      --- cache %d ---\n", try);
       print_8000001d_eax(words[WORD_EAX]);
       print_8000001d_ebx(words[WORD_EBX]);
@@ -9022,17 +9964,40 @@ print_reg (unsigned int        reg,
              words[WORD_EDX], words[WORD_EDX]);
    } else if (reg == 0x80000020) {
       if (try == 0) {
-         printf("   PQoS Enforcement for Memory Bandwidth (0x80000020):\n");
+         printf("   PQoS Enforcement (0x80000020):\n");
          print_80000020_0_ebx(words[WORD_EBX]);
       } else if (try == 1) {
-         printf("      capacity bitmask length              = 0x%0llx (%llu)\n",
+         printf("   PQoS Enforcement for L3 External Bandwidth"
+                " (0x80000020/1):\n");
+         printf("      capacity bitmask length      = 0x%0llx (%llu)\n",
                 (unsigned long long)words[WORD_EAX] + 1,
                 (unsigned long long)words[WORD_EAX] + 1);
-         printf("      number of classes of service         = 0x%0x (%u)\n",
+         printf("      number of classes of service = 0x%0x (%u)\n",
                 words[WORD_EDX], words[WORD_EDX]);
+      } else if (try == 2) {
+         printf("   PQoS Enforcement for L3 External Slow Memory Bandwidth"
+                " (0x80000020/2):\n");
+         printf("      capacity bitmask length      = 0x%0llx (%llu)\n",
+                (unsigned long long)words[WORD_EAX] + 1,
+                (unsigned long long)words[WORD_EAX] + 1);
+         printf("      number of classes of service = 0x%0x (%u)\n",
+                words[WORD_EDX], words[WORD_EDX]);
+      } else if (try == 3) {
+         printf("   PQoS Enforcement for Bandwidth Monitoring Event"
+                " Configuration (0x80000020/3):\n");
+         print_80000020_3_ebx(words[WORD_EBX]);
+         print_80000020_3_ecx(words[WORD_ECX]);
       } else {
          print_reg_raw(reg, try, words);
       }
+   } else if (reg == 0x80000021) {
+      printf("   Extended Feature 2 (0x80000021):\n");
+      print_80000021_eax(words[WORD_EAX]);
+      print_80000021_ebx(words[WORD_EBX]);
+   } else if (reg == 0x80000022) {
+      printf("   Extended Performance Monitoring and Debugging (0x80000022):\n");
+      print_80000022_eax(words[WORD_EAX]);
+      print_80000022_ebx(words[WORD_EBX]);
    } else if (reg == 0x80860000) {
       // max already set to words[WORD_EAX]
    } else if (reg == 0x80860001) {
@@ -9107,41 +10072,84 @@ print_reg (unsigned int        reg,
    }
 }
 
+// Return nr_cpu_ids, one more than the maximum CPU number.  (This term is used
+// within the linux kernel.)  For systems with contiguous CPU numbers, this is
+// the total number of CPUs.  But it may be larger for systems with potentially
+// non-contiguous CPU numbers.
+static unsigned long  get_nr_cpu_ids(void)
+{
+#if defined(USE_KERNEL_SCHED_SETAFFINITY)
+   static unsigned long  result = 0;
+   if (result == 0) {
+      unsigned long  attempt = 1024;
+      for (;;) {
+         size_t  setsize = attempt / 8;
+         char*   set     = malloc(setsize);
+         if (set == NULL) {
+            fprintf(stderr, "%s: out of memory (get_nr_cpu_ids)\n", program);
+            exit(1);
+         }
+         int  status;
+         status = syscall(__NR_sched_getaffinity, 0, setsize, set);
+         free(set);
+         if (status >= 0) {
+            // The setsize is big enough
+            result = attempt;
+            break;
+         } else if (status == -1 && errno != EINVAL) {
+            fprintf(stderr, 
+                    "%s: unable to getaffinity to determine nr_cpu_ids"
+                    "; errno = %d (%s)\n", 
+                    program, errno, strerror(errno));
+            fprintf(stderr, 
+                    "%s: using -1 will run on an arbitrary CPU, which does"
+                    " not require nr_cpu_ids.\n",
+                    program);
+            exit(1);
+         }
+         // The setsize is not big enough: make another attempt
+         attempt *= 2;
+      }
+   }
+   return result;
+#elif defined(USE_PROCESSOR_BIND)
+   return sysconf(_SC_NPROCESSORS_CONF);
+#else
+   unsigned long  result = sysconf(_SC_NPROCESSORS_CONF);
+   if (result > CPU_SETSIZE) result = CPU_SETSIZE;
+   return result;
+#endif
+}
+
+unsigned int  nr_cpu_ids;
+
+static void  real_prepare(void)
+{
+   nr_cpu_ids = get_nr_cpu_ids();
+}
+
 #define USE_INSTRUCTION  (-2)
 
-#define MAX_CPUS  1024
-
-static int
-real_setup(unsigned int  cpu,
-           boolean       one_cpu,
-           boolean       inst)
+static int  real_setup(unsigned int  cpu,
+                       boolean       one_cpu,
+                       boolean       inst)
 {
    if (inst) {
       if (!one_cpu) {
-         /*
-         ** This test is necessary because some versions of Linux will accept
-         ** a sched_setaffinity mask that includes only nonexistent CPUs.
-         */
-         static unsigned int  num_cpus = 0;
-         if (num_cpus == 0) {
-            num_cpus = sysconf(_SC_NPROCESSORS_CONF);
-         }
-         if (cpu >= num_cpus) return -1;
-
-#ifdef USE_KERNEL_SCHED_SETAFFINITY
+#if defined(USE_KERNEL_SCHED_SETAFFINITY)
          /*
          ** The interface for sched_setaffinity and cpusets has changed many
          ** times.  Insulate this tool from all that by calling the system
          ** service directly.
          */
-         unsigned int  mask[MAX_CPUS / (sizeof(unsigned int)*8)];
-         bzero(&mask, sizeof(mask));
-         mask[cpu / (sizeof(unsigned int)*8)]
-            = (1 << cpu % (sizeof(unsigned int)*8));
+         unsigned char*  mask = malloc(nr_cpu_ids/8);
+         bzero(mask, nr_cpu_ids/8);
+         mask[cpu / 8] = (1 << (cpu % 8));
 
          int  status;
-         status = syscall(__NR_sched_setaffinity, 0, sizeof(mask), &mask);
-#elif defined(__sun)
+         status = syscall(__NR_sched_setaffinity, 0, nr_cpu_ids/8, mask);
+         free(mask);
+#elif defined(USE_PROCESSOR_BIND)
          pthread_t thread = pthread_self();
          int status = processor_bind(P_LWPID, thread, cpu, NULL);
 #else
@@ -9336,38 +10344,6 @@ static int real_get (int           cpuid_fd,
 }
 
 static void
-print_header (unsigned int  reg,
-              unsigned int  try,
-              boolean       raw)
-{
-   if (!raw) {
-      if (reg == 2 && try == 0) {
-         printf("   cache and TLB information (2):\n");
-      } else if (reg == 4 && try == 0) {
-         printf("   deterministic cache parameters (4):\n");
-      } else if (reg == 7 && try == 0) {
-         printf("   extended feature flags (7):\n");
-      } else if (reg == 0xb && try == 0) {
-         printf("   x2APIC features / processor topology (0xb):\n");
-      } else if (reg == 0x1d && try == 0) {
-         printf("   Tile Information (0x1d/0):\n");
-      } else if (reg == 0x1f && try == 0) {
-         printf("   V2 extended topology (0x1f):\n");
-      } else if (reg == 0x20 && try == 0) {
-         printf("   Processor History Reset information (0x20):\n");
-      } else if (reg == 0x40000003 && try == 0) {
-         printf("   hypervisor time features (0x40000003/00):\n");
-      } else if (reg == 0x40000003 && try == 1) {
-         printf("   hypervisor time scale & offset (0x40000003/01):\n");
-      } else if (reg == 0x40000003 && try == 2) {
-         printf("   hypervisor time physical cpu frequency (0x40000003/02):\n");
-      } else if (reg == 0x8000001d && try == 0) {
-         printf("   Cache Properties (0x8000001d):\n");
-      }
-   }
-}
-
-static void
 do_real_one(unsigned int  reg,
             unsigned int  try,
             boolean       one_cpu,
@@ -9375,16 +10351,18 @@ do_real_one(unsigned int  reg,
             boolean       raw,
             boolean       debug UNUSED)
 {
+   real_prepare();
+   
    unsigned int  cpu;
 
-   for (cpu = 0;; cpu++) {
+   for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
       int            cpuid_fd   = -1;
       code_stash_t   stash      = NIL_STASH;
 
       if (one_cpu && cpu > 0) break;
 
       cpuid_fd = real_setup(cpu, one_cpu, inst);
-      if (cpuid_fd == -1) break;
+      if (cpuid_fd == -1) continue;
 
       if (inst && one_cpu) {
          printf("CPU:\n");
@@ -9404,9 +10382,11 @@ do_real(boolean  one_cpu,
         boolean  raw,
         boolean  debug)
 {
+   real_prepare();
+
    unsigned int  cpu;
 
-   for (cpu = 0;; cpu++) {
+   for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
       int            cpuid_fd   = -1;
       code_stash_t   stash      = NIL_STASH;
       unsigned int   max;
@@ -9415,7 +10395,7 @@ do_real(boolean  one_cpu,
       if (one_cpu && cpu > 0) break;
 
       cpuid_fd = real_setup(cpu, one_cpu, inst);
-      if (cpuid_fd == -1) break;
+      if (cpuid_fd == -1) continue;
 
       if (inst && one_cpu) {
          printf("CPU:\n");
@@ -9437,8 +10417,6 @@ do_real(boolean  one_cpu,
             unsigned int  max_tries = words[WORD_EAX] & 0xff;
             unsigned int  try       = 0;
 
-            print_header(reg, try, raw);
-
             for (;;) {
                print_reg(reg, words, raw, try, &stash);
 
@@ -9449,30 +10427,28 @@ do_real(boolean  one_cpu,
             }
          } else if (reg == 4) {
             unsigned int  try = 0;
-            while ((words[WORD_EAX] & 0x1f) != 0) {
-               print_header(reg, try, raw);
+            for (;;) {
                print_reg(reg, words, raw, try, &stash);
+               // exit when cache type indicates "no more caches" (0).
+               if ((words[WORD_EAX] & 0x1f) == 0) break;
                try++;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
          } else if (reg == 7) {
-            unsigned int  try = 0;
-            unsigned int  max_tries;
+            unsigned int  max_tries = words[WORD_EAX];
+            unsigned int  try       = 0;
             for (;;) {
-               print_header(reg, try, raw);
                print_reg(reg, words, raw, try, &stash);
-               if (try == 0) {
-                  max_tries = words[WORD_EAX];
-               }
                try++;
                if (try > max_tries) break;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
          } else if (reg == 0xb) {
             unsigned int  try = 0;
-            while (words[WORD_EAX] != 0 || words[WORD_EBX] != 0) {
-               print_header(reg, try, raw);
+            for (;;) {
                print_reg(reg, words, raw, try, &stash);
+               // exit when level type indicates invalid (0).
+               if (BIT_EXTRACT_LE(words[WORD_ECX], 8, 16) == 0) break;
                try++;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
@@ -9489,7 +10465,6 @@ do_real(boolean  one_cpu,
             **    what the upper bound of any loop would be, so it seems
             **    inappropriate to use one.
             */
-            print_header(reg, 0, raw);
             print_reg(reg, words, raw, 0, &stash);
             unsigned long long  valid_xcr0
                = ((unsigned long long)words[WORD_EDX] << 32) | words[WORD_EAX];
@@ -9507,7 +10482,6 @@ do_real(boolean  one_cpu,
             }
          } else if (reg == 0xf) {
             unsigned int  mask = words[WORD_EDX];
-            print_header(reg, 0, raw);
             print_reg(reg, words, raw, 0, &stash);
             if (BIT_EXTRACT_LE(mask, 1, 2)) {
                real_get(cpuid_fd, reg, words, 1, FALSE);
@@ -9515,7 +10489,6 @@ do_real(boolean  one_cpu,
             }
          } else if (reg == 0x10) {
             unsigned int  mask = words[WORD_EBX];
-            print_header(reg, 0, raw);
             print_reg(reg, words, raw, 0, &stash);
             unsigned int  try;
             for (try = 1; try < 32; try++) {
@@ -9525,132 +10498,95 @@ do_real(boolean  one_cpu,
                }
             }
          } else if (reg == 0x12) {
-            unsigned int  mask = words[WORD_EAX];
-            print_header(reg, 0, raw);
             print_reg(reg, words, raw, 0, &stash);
-            unsigned int  try;
-            for (try = 1; try < 33; try++) {
-               if (mask & (1 << (try-1))) {
-                  real_get(cpuid_fd, reg, words, try, FALSE);
-                  print_reg(reg, words, raw, try, &stash);
-               }
+            real_get(cpuid_fd, reg, words, 1, FALSE);
+            print_reg(reg, words, raw, 1, &stash);
+            unsigned int  try = 2;
+            for (;; try++) {
+               real_get(cpuid_fd, reg, words, try, FALSE);
+               print_reg(reg, words, raw, try, &stash);
+               // 325462: Intel 64 and IA-32 Architectures Software Developer's
+               // Manual Combined Volumes: 1, 2A, 2B, 2C, 3A, 3B, 3C, 3D, and 4,
+               // Volume 3: System Programming Guide, section 32.7.2: Intel SGX
+               // Resource Enumeration Leaves suggests a loop that exits when
+               // encountering the first invalid leaf.
+               if ((words[WORD_EAX] & 0xf) == 0) break;
             }
          } else if (reg == 0x14) {
-            unsigned int  try = 0;
-            unsigned int  max_tries;
+            unsigned int  max_tries = words[WORD_EAX];
+            unsigned int  try       = 0;
             for (;;) {
-               print_header(reg, try, raw);
                print_reg(reg, words, raw, try, &stash);
-               if (try == 0) {
-                  max_tries = words[WORD_EAX];
-               }
                try++;
                if (try > max_tries) break;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
          } else if (reg == 0x17) {
-            unsigned int  try = 0;
-            unsigned int  max_tries;
+            unsigned int  max_tries = words[WORD_EAX];
+            unsigned int  try       = 0;
             for (;;) {
-               print_header(reg, try, raw);
                print_reg(reg, words, raw, try, &stash);
-               if (try == 0) {
-                  max_tries = words[WORD_EAX];
-               }
                try++;
                if (try > max_tries) break;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
          } else if (reg == 0x18) {
-            unsigned int  try = 0;
-            unsigned int  max_tries;
+            unsigned int  max_tries = words[WORD_EAX];
+            unsigned int  try       = 0;
             for (;;) {
-               print_header(reg, try, raw);
                print_reg(reg, words, raw, try, &stash);
-               if (try == 0) {
-                  max_tries = words[WORD_EAX];
-               }
                try++;
                if (try > max_tries) break;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
-         } else if (reg == 0x1d) {
-            unsigned int  try = 0;
-            unsigned int  max_tries;
-            for (;;) {
-               print_header(reg, try, raw);
+         } else if (reg == 0x1b) {
+            print_reg(reg, words, raw, 0, &stash);
+            unsigned int  try = 1;
+            for (;; try++) {
+               real_get(cpuid_fd, reg, words, try, FALSE);
                print_reg(reg, words, raw, try, &stash);
-               if (try == 0) {
-                  max_tries = words[WORD_EAX];
-               }
+               // Sub-leaf type of invalid (0) means that all subsequent
+               // subleaves are invalid too.
+               if ((words[WORD_EAX] & 0xfff) == 0) break;
+            }
+         } else if (reg == 0x1d) {
+            unsigned int  max_tries = words[WORD_EAX];
+            unsigned int  try       = 0;
+            for (;;) {
+               print_reg(reg, words, raw, try, &stash);
                try++;
                if (try > max_tries) break;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
          } else if (reg == 0x1f) {
-            print_header(reg, 0, raw);
             print_reg(reg, words, raw, 0, &stash);
             unsigned int  try;
             for (try = 1; try < 256; try++) {
                real_get(cpuid_fd, reg, words, try, FALSE);
                print_reg(reg, words, raw, try, &stash);
+               // exit when level type indicates invalid (0).
                if (BIT_EXTRACT_LE(words[WORD_ECX], 8, 16) == 0) break;
             }
          } else if (reg == 0x20) {
-            unsigned int  try = 0;
-            unsigned int  max_tries;
+            unsigned int  max_tries = words[WORD_EAX];
+            unsigned int  try       = 0;
             for (;;) {
-               print_header(reg, try, raw);
                print_reg(reg, words, raw, try, &stash);
-               if (try == 0) {
-                  max_tries = words[WORD_EAX];
-               }
+               try++;
+               if (try > max_tries) break;
+               real_get(cpuid_fd, reg, words, try, FALSE);
+            }
+         } else if (reg == 0x23) {
+            unsigned int  max_tries = words[WORD_EAX];
+            unsigned int  try       = 0;
+            for (;;) {
+               print_reg(reg, words, raw, try, &stash);
                try++;
                if (try > max_tries) break;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
          } else {
             print_reg(reg, words, raw, 0, &stash);
-         }
-      }
-
-      if (BIT_EXTRACT_LE(stash.val_1_ecx, 31, 32)) {
-         max = 0x40000000;
-         for (reg = 0x40000000; reg <= max; reg++) {
-            boolean       success;
-            unsigned int  words[WORD_NUM];
-
-            success = real_get(cpuid_fd, reg, words, 0, TRUE);
-            if (!success) break;
-
-            if (reg == 0x40000000) {
-               max = words[WORD_EAX];
-            }
-
-            if (reg == 0x40000003 && stash.hypervisor == HYPERVISOR_XEN) {
-               unsigned int  try = 0;
-               while (try <= 2) {
-                  print_header(reg, try, raw);
-                  print_reg(reg, words, raw, try, &stash);
-                  try++;
-                  real_get(cpuid_fd, reg, words, try, FALSE);
-               }
-            } else {
-               print_reg(reg, words, raw, 0, &stash);
-            }
-
-            if (reg == 0x40000000
-                && stash.hypervisor == HYPERVISOR_KVM
-                && max == 0) {
-               max = 0x40000001;
-            }
-            if (reg == 0x40000000
-                && stash.hypervisor == HYPERVISOR_UNKNOWN
-                && max > 0x40001000) {
-               // Assume some busted cpuid information and stop walking
-               // further 0x4xxxxxxx registers.
-               max = 0x40000000;
-            }
          }
       }
 
@@ -9678,6 +10614,66 @@ do_real(boolean  one_cpu,
          print_reg(reg, words, raw, 0, &stash);
       }
 
+      if (BIT_EXTRACT_LE(stash.val_1_ecx, 31, 32)) {
+         // Xen (and probably other hypervisors in the future) support
+         // configurable ranges, so that hypervisors can exist under other
+         // hypervisors.  Walk the possible base addresses looking for valid
+         // hypervisors.  See Xen's tools/misc/xen-detect.c for the reg range &
+         // stride.
+         unsigned int  base = 0x40000000;
+         for (; base < 0x40010000; base += 0x100) {
+            // Use the base leaf to determine if this is a valid hypervisor, its
+            // identity, and its max register.  Always print the base leaf, even
+            // if it's invalid (to clearly indicate that it is).
+            {
+               boolean       success;
+               unsigned int  words[WORD_NUM];
+
+               success = real_get(cpuid_fd, base, words, 0, TRUE);
+               if (!success) break;
+
+               print_reg(base, words, raw, 0, &stash);
+
+               max = words[WORD_EAX];
+               if (stash.hypervisor == HYPERVISOR_KVM && max == 0) {
+                  max = base + 1;
+               }
+
+               // Check for broken hypervisor information.  If it looks broken,
+               // skip the reg loop, and break out of the base loop.  Note that
+               // HYPERVISOR_UNKNOWN does not imply broken by itself!
+               if (stash.hypervisor == HYPERVISOR_UNKNOWN
+                   && max > base + 0x100) {
+                  break;
+               }
+               if (max < base) {
+                  break;
+               }
+            }
+
+            // For a valid hypervisor, walk all additional leaves.
+            for (reg = base+1; reg <= max; reg++) {
+               boolean       success;
+               unsigned int  words[WORD_NUM];
+
+               success = real_get(cpuid_fd, reg, words, 0, TRUE);
+               if (!success) break;
+
+               if (IS_HYPERVISOR_LEAF(reg, 3)
+                   && stash.hypervisor == HYPERVISOR_XEN) {
+                  unsigned int  try = 0;
+                  while (try <= 2) {
+                     print_reg(reg, words, raw, try, &stash);
+                     try++;
+                     real_get(cpuid_fd, reg, words, try, FALSE);
+                  }
+               } else {
+                  print_reg(reg, words, raw, 0, &stash);
+               }
+            }
+         }
+      }
+
       max = 0x80000000;
       for (reg = 0x80000000; reg <= max; reg++) {
          boolean       success;
@@ -9693,20 +10689,19 @@ do_real(boolean  one_cpu,
          if (reg == 0x8000001d) {
             unsigned int  try = 0;
             while ((words[WORD_EAX] & 0x1f) != 0) {
-               print_header(reg, try, raw);
                print_reg(reg, words, raw, try, &stash);
                try++;
                real_get(cpuid_fd, reg, words, try, FALSE);
             }
          } else if (reg == 0x80000020) {
-            // Rules for loop termination from SKC*.
-            unsigned int  try = 0;
-            while (words[WORD_EAX] != 0 || words[WORD_EBX] != 0 ||
-                   words[WORD_ECX] != 0 || words[WORD_EDX] != 0) {
-               print_header(reg, try, raw);
-               print_reg(reg, words, raw, try, &stash);
-               try++;
-               real_get(cpuid_fd, reg, words, try, FALSE);
+            unsigned int  mask = words[WORD_EBX];
+            print_reg(reg, words, raw, 0, &stash);
+            unsigned int  try;
+            for (try = 1; try < 32; try++) {
+               if (mask & (1 << try)) {
+                  real_get(cpuid_fd, reg, words, try, FALSE);
+                  print_reg(reg, words, raw, try, &stash);
+               }
             }
          } else {
             print_reg(reg, words, raw, 0, &stash);
@@ -9760,21 +10755,18 @@ do_file(ccstring  filename,
         boolean   raw,
         boolean   debug)
 {
-   boolean       seen_cpu    = FALSE;
-   unsigned int  cpu         = -1;
+   boolean       seen_cpu  = FALSE;
+   unsigned int  cpu       = -1;
    /*
-   ** The try* variables are a kludge to deal with those leaves that depended on
-   ** the try (a.k.a. ecx) values that existed with cpuid's old-style method of
-   ** dumping raw leaves, which lacked an explicit indication of the try number.
-   ** It is not necessary to add more kludges for more modern ecx-dependent
+   ** The legacytry variable is a kludge to deal with those leaves that depend
+   ** on the try (a.k.a. ecx) values when the input is in cpuid's legacy style
+   ** of dumping raw leaves, which lacked an explicit indication of the try
+   ** number.  The lastreg also is used to reset the legacytry to 0 for new
    ** leaves.
    */
-   unsigned int  try2        = -1;
-   unsigned int  try4        = -1;
-   unsigned int  try7        = -1;
-   unsigned int  tryb        = -1;
-   unsigned int  try8000001d = -1;
-   code_stash_t  stash       = NIL_STASH;
+   unsigned int  lastreg   = -1;
+   unsigned int  legacytry = 0;
+   code_stash_t  stash     = NIL_STASH;
 
    FILE*  file;
    if (strcmp(filename, "-") == 0) {
@@ -9822,11 +10814,8 @@ do_file(ccstring  filename,
          } else {
             printf("CPU:\n");
          }
-         try2        = 0;
-         try4        = 0;
-         try7        = 0;
-         tryb        = 0;
-         try8000001d = 0;
+         lastreg   = -1;
+         legacytry = 0;
          {
             static code_stash_t  empty_stash = NIL_STASH;
             stash = empty_stash;
@@ -9840,8 +10829,8 @@ do_file(ccstring  filename,
                       &words[WORD_EAX], &words[WORD_EBX],
                       &words[WORD_ECX], &words[WORD_EDX]);
       if (status == 6) {
-         print_header(reg, try, raw);
          print_reg(reg, words, raw, try, &stash);
+         lastreg = reg;
          continue;
       }
       status = sscanf(ptr,
@@ -9850,24 +10839,13 @@ do_file(ccstring  filename,
                       &words[WORD_EAX], &words[WORD_EBX],
                       &words[WORD_ECX], &words[WORD_EDX]);
       if (status == 5) {
-         if (reg == 2) {
-            print_header(reg, try2, raw);
-            print_reg(reg, words, raw, try2++, &stash);
-         } else if (reg == 4) {
-            print_header(reg, try4, raw);
-            print_reg(reg, words, raw, try4++, &stash);
-         } else if (reg == 7) {
-            print_header(reg, try7, raw);
-            print_reg(reg, words, raw, try7++, &stash);
-         } else if (reg == 0xb) {
-            print_header(reg, tryb, raw);
-            print_reg(reg, words, raw, tryb++, &stash);
-         } else if (reg == 0x8000001d) {
-            print_header(reg, try8000001d, raw);
-            print_reg(reg, words, raw, try8000001d++, &stash);
+         if (reg == lastreg) {
+            legacytry++;
          } else {
-            print_reg(reg, words, raw, 0, &stash);
+            legacytry = 0;
          }
+         print_reg(reg, words, raw, legacytry, &stash);
+         lastreg = reg;
          continue;
       }
 

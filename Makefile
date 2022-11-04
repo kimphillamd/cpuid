@@ -4,11 +4,11 @@ LDFLAGS?=
 ifneq (,$(findstring arch=i386,$(CFLAGS)))
 CISA=-m32
 endif
-CFL=$(CPPFLAGS) $(CFLAGS) $(CISA) -Wall -W -Wshadow -Wcast-align -Wredundant-decls -Wbad-function-cast -Wcast-qual -Wwrite-strings -Waggregate-return -Wstrict-prototypes -Wmissing-prototypes -Wimplicit-fallthrough -Wunused-parameter -D_FILE_OFFSET_BITS=64 -DVERSION=$(VERSION)
+CFL=$(CPPFLAGS) $(CFLAGS) $(CISA) -Wall -W -Wshadow -Wcast-align -Wredundant-decls -Wbad-function-cast -Wcast-qual -Wwrite-strings -Waggregate-return -Wstrict-prototypes -Wmissing-prototypes -Wimplicit-fallthrough -Wunused-parameter -Wundef -D_FILE_OFFSET_BITS=64 -DVERSION=$(VERSION)
 INSTALL_STRIP=-s
 
 PACKAGE=cpuid
-VERSION=20201006
+VERSION=20221003
 RELEASE=1
 
 PROG=$(PACKAGE)
@@ -38,7 +38,7 @@ OTHER_BINS=$(PROG).man cpuinfo2cpuid.man
 REL_DIR=../$(shell date +%Y-%m-%d)
 WEB_DIR=/toad2/apps.mine/www/www/$(PROG)
 
-BUILDROOT=
+BUILDROOT=$(DESTDIR)
 
 default: $(PROG) $(PROG).man.gz cpuinfo2cpuid cpuinfo2cpuid.man.gz
 
@@ -76,7 +76,7 @@ clean:
 # Todd's Development rules
 
 OLD_DIR=/tmp/cpuid
-OLD_HOST_i386=hyena
+OLD_HOST_i386=raptor
 OLD_HOST_x86_64=iggy
 
 $(PROG).old: cpuid.c Makefile
