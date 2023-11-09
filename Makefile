@@ -8,7 +8,7 @@ CFL=$(CPPFLAGS) $(CFLAGS) $(CISA) -Wall -W -Wshadow -Wcast-align -Wredundant-dec
 INSTALL_STRIP=-s
 
 PACKAGE=cpuid
-VERSION=20221003
+VERSION=20230614
 RELEASE=1
 
 PROG=$(PACKAGE)
@@ -75,22 +75,11 @@ clean:
 
 # Todd's Development rules
 
-OLD_DIR=/tmp/cpuid
-OLD_HOST_i386=raptor
-OLD_HOST_x86_64=iggy
-
-$(PROG).old: cpuid.c Makefile
-	ssh $(OLD_HOST) "rm -rf $(OLD_DIR); mkdir -p $(OLD_DIR)"
-	scp -p $^ $(OLD_HOST):$(OLD_DIR)
-	ssh $(OLD_HOST) "cd $(OLD_DIR); make cpuid"
-	scp -p $(OLD_HOST):$(OLD_DIR)/cpuid $(TARGET)
-	ssh $(OLD_HOST) "rm -rf $(OLD_DIR)"
-
 $(PROG).i386: cpuid.c Makefile
-	$(MAKE) -$(MAKEFLAGS) $(PROG).old TARGET=$@ OLD_HOST=$(OLD_HOST_i386)
+	$(CC) -m32 -static $(CFL) $(LDFLAGS) -o $@ cpuid.c
 	
 $(PROG).x86_64: cpuid.c Makefile
-	$(MAKE) -$(MAKEFLAGS) $(PROG).old TARGET=$@ OLD_HOST=$(OLD_HOST_x86_64)
+	$(CC) -static $(CFL) $(LDFLAGS) -o $@ cpuid.c
 
 todd: $(PROG).i386 $(PROG).x86_64
 	rm -f ~/.bin/execs/i586/$(PROG)

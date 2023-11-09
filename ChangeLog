@@ -1,3 +1,361 @@
+Wed Jun 14 2023 Todd Allen <todd.allen@etallen.com>
+	* Made new release.
+
+Wed Jun 14 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Improved (synth) identification for (0,6),(5,5),10 Intel
+	  Xeon Scalable (3rd Gen) (Cooper Lake A0), based on 634897 doc.
+	* cpuid.c: Changed (synth) identification for (0,6),(6,12) Intel Xeon
+	  D-1700/2700 (Ice Lake-D).  Intel docs 714071 claim the stepping is
+	  U1/U2, which contradicts ILPMDF*.  I'm using the actual docs.
+	* cpuid.c: Updated comments with new Intel docs.
+	* cpuid.c: Changed "Intel Scalable" to "Intel Xeon Scalable".
+	* cpuid.man: Added new Intel docs.
+	* cpuid.man: Added 613537, the new pub number for 336065, Intel Xeon
+	  Processor Scalable Family Specification Update.
+
+Mon Jun  5 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added (synth) differentiation for (0,6),(9,10),4 Intel
+	  Pentium Gold 8500 series.
+
+Sat May 13 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Made the (simple synth) fields non-default.  Too many people
+	  were interpreting them as definitive and ignoring the much better
+	  (synth) leaf, which uses the entirety of cpuid information.  This
+	  impacts leaves 1, 0x80000001, and 0x80860001.  The (simple synth)
+	  fields still are available, but only with the -S/--simple option.
+	* cpuid.c: Organized option flags that need to be passed deeply down in
+	  the print_reg* functions into a new print_opts_t, which will make
+	  future options easier to add.
+	* cpuid.c: Renamed the old "try" variables to "sub".  The word "try" was
+	  a remnant of the original leaf 4 subleaf implemntation, before
+	  subleaves were commonplace.  For leaf 4, one just kept "trying" to
+	  read more cache data until it failed.  But most subleaves don't work
+	  that way.
+
+Sat May 13 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Updated (synth) decoding for (0,6),(8,15),{7,8} to mention
+	  steppings {S2,S3} from ILPMDF* 20230512.
+	* cpuid.c: Added (synth) decoding for (0,6),(11,14) pure Atom x7000E,
+	  as a variation on other Alder Lake-N CPUs.
+	* cpuid.c: Added (synth) decoding for (0,6),(9,10),4 Atom C1100 Arizona
+	  Beach.
+
+Thu May  5 2023 Todd Allen <todd.allen@etallen.com>
+	* Made new release.
+
+Fri May  5 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Fixed bug in (multi-processing synth) in the recently
+	  rewritten decode_mp_synth().  The CPU counts for higher levels were
+	  not dividing out counts from lower levels.  This is analogous to the
+	  way print_apic_synth() subtracts out bit widths from lower levels.
+
+Fri May  5 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Differentiate Core i3-N300 N-Series from ordinary N-Series.
+	  (They appear to differ only in branding.)
+
+Fri Apr 28 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added hypervisor+4/eax bit 21: use hypercalls for MMIO config
+	  space I/O, based on LX* (Michael Kelley PCI pass-thru patches).  Not
+	  documented by Microsoft yet.
+
+Tue Apr 25 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: In real_setup(), make inability to switch to CPU 0 no longer
+	  a fatal error.  It is allowable for CPU 0 to be offlined, just like any
+	  other.
+
+Tue Apr 18 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added (synth) decoding for (0,6),(8,15) Xeon W version of
+	  Sapphire Rapids, from instlatx64 sample.
+	* cpuid.c: Corrected (synth) & (uarch synth) for Sapphire Rapids:
+	  family is Golden Cove, not Sunny Cove.
+	* cpuid.c: Added (synth) & (uarch synth) Emerald Rapids family:
+	  Raptor Cove.
+	* cpuid.c: Added (synth) & (uarch synth) Granite Rapids family:
+	  Redwood Cove.
+	* cpuid.c: In decode_uarch_intel, mark Sapphire Rapids, Emerald Rapids
+	  & Granite Rapids with core_is_uarch to avoid replicating the name in
+	  (synth).
+
+Sun Apr 16 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added (synth) decoding for (0,6),(10,10),2 Meteor Lake-M B0
+	  from Coreboot*.
+
+Thu Apr  6 2023 Todd Allen <todd.allen@etallen.com>
+	* Made new release.
+
+Thu Apr  6 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Fixed bug in print_apic_synth() when interpreting leaf 0xb
+	  and 0x1f bit widths: In fact, they are bit *offsets*, different from
+	  the *widths* of leaf 4!  So the (APIC width synth) often has been off
+	  by 1, and the (APIC synth) PKG_ID & CORE_ID values often have been
+	  shifted incorrectly.
+	* cpuid.c: For 0xb/*/eax & 0x1f/*/eax, rename field to "bit width of
+	  level & previous levels" to reflect this definition.
+	* cpuid.c: In print_apic_synth(), decode_mp_synth(), and
+	  print_mp_synth(), support APIC bit fields for the newest 4 topology
+	  layers: module, tile, die, die group.  And for the mp version, also
+	  the older cu & pkg levels.
+	* cpuid.c: In print_apic_synth(), use the extended APIC ID's when
+	  available in a variety of leaves.
+	* cpuid.c: In print_apic_synth() & decode_mp_synth(), support leaf 0xb
+	  method for AMD/Hygon.
+	* cpuid.c: In decode_mp_synth(), for the 1/0x80000008 method, use the
+	  same family-specific technique to differentiate CU's from cores, or
+	  cores from threads as in print_apic_synth().
+
+Tue Apr  4 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added prelim Bergamo A1 stepping from sample from @YuuKi_AnS.
+
+Fri Mar 31 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added 7/1/edx AMX-COMPLEX instructions.
+	* cpuid.c: Added 7/2/edx UC-lock disable.
+	* cpuid.c: Added 0x10/n/ecx non-contiguous 1s value supported.
+	* cpuid.c: Added 0x1c/ecx event logging supported bitmap.
+	* cpuid.c: Added 0x23/0/ebx decoding.
+
+Tue Mar 28 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Decode 0x80000026/1/ebx core type & native model.
+
+Tue Mar 28 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: For 0x80000021/eax, capitalize REP STOSB & REP CMPSB to match
+	  Intel versions in 7/1/eax.
+	* cpuid.c: For 0x80000022/ecx, shorten description, show bitmask only in
+	  hex.
+
+Tue Mar 28 2023 Smita Koralahalli Channabasappa <Smita.KoralahalliChannabasappa@amd.com>
+	* cpuid.c: Update CPUID utility with new feature bits as documented in
+	  the AMD Processor Programming Reference for Family 19h and Model 11h:
+	  0x8000000a/edx extended LVT offset fault change
+	  0x80000021/eax enhanced predictive store forwarding, FSRS, FSRC,
+	  FsGsKernelGsBaseNonSerializing
+	  0x80000022/ebx number of available UMC PMCs
+	  0x80000022/ecx bitmask representing active UMCs
+
+Tue Mar 28 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Differentiate preliminary (uarch synth) for (0,6),(10,10);
+	  (0,6),(10,11); (0,6),(10,12); and (0,6),(11,5) Crestmont Atom cores
+	  from their Redwood Cove counterparts.
+	* cpuid.c: Add preliminary (synth) & (uarch synth) for (0,6),(12,6)
+	  Lion Cove & Skymont, from LX*.
+
+Sat Mar 25 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added 12/0/eax SGX ENCLS EUPDATESVN bit.
+	* cpuid.c: Added 0x1f/*/ecx level type value "die group (6)".
+
+Mon Mar 20 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added (synth) decoding for (0,6),(8,15) Sapphire Rapids D &
+	  E0 steppings from coreboot*.
+	* cpuid.c: Improved (synth) decoding for (0,6),(6,10) Scalable 3rd Gen
+	  Xeons to Ice Lake-SP.  Also, improved decoding for engr samples where
+	  the brand string omits Xeon & Bronze/Silver/Gold/Platinum.
+
+Fri Mar 17 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Improved (synth) decoding for (0,6),(11,14) Intel N-Series.
+	* cpuid.c: Differentiate (synth) & (uarch synth) for (0,6),(11,14)
+	  Alder Lake-N based on core type, much like for other Alder Lake models.
+	  This corrects the cores to Gracemont.  As for Golden Cove, perhaps
+	  P-cores never will exist for this model but, if they do, they should
+	  now be decoded correctly.
+	* cpuid.man: Added 759603: Intel Processor and Intel Core i3 N-Series
+	  Datasheet, Volume 1 of 2.
+	* cpuid.c: Updated (synth) decoding for (0,6),(11,15),5 with
+	  Raptor Lake-S/HX/P.
+	* cpuid.c: Updated (synth) decoding for (0,6),(11,10) with
+	  Raptor Lake-H/U/P.
+
+Mon Mar  6 2023 Todd Allen <todd.allen@etallen.com>
+	* Made new release.
+
+Sun Mar  5 2023 Todd Allen <todd.allen@etallen.com>
+	* Based on Intel-Linux-Processor-Microcode-Data-Files (ILPMDF*), made
+	  the following (synth) changes:
+	* cpuid.c: Updated (0,6),(3,7),8 Bay Trail with stepping name C0.
+	* cpuid.c: Added (0,6),(4,5),1 Haswell-ULT C0/D0 stepping.
+	* cpuid.c: Corrected (0,6),(4,6),1 Crystal Well to C0 stepping.
+	* cpuid.c: Updated (0,6),(4,7),1 Broadwell to include E0 stepping.
+	* cpuid.c: Added (0,6),(5,5),3 Skylake B1 (Xeon Scalable).
+	* cpuid.c: Added (0,6),(5,5),5 Skylake A0 (Xeon Scalable).
+	* cpuid.c: Added (0,6),(5,5),11 Cooper Lake A1 (Xeon Scalable).
+	* cpuid.c: Updated (0,6),(5,14),3 Skylake-H/S/E3, adding N0 & S0
+	  steppings.
+	* cpuid.c: Added (0,6),(6,10),5 Ice Lake C0 (Xeon Scalable).
+	* cpuid.c: Added (0,6),(6,12),1 Ice Lake B0.
+	* cpuid.c: Updated (0,6),(8,6),4 Snow Ridge with stepping B0.
+	* cpuid.c: Updated (0,6),(8,6),5 Snow Ridge with stepping B1.
+	* cpuid.c: Added (0,6),(8,6),1 Lakefield B2/B3 stepping.
+	* cpuid.c: Corrected (0,6),(8,12),1 Tiger Lake stepping to B1.
+	* cpuid.c: Added (0,6),(8,12),2 Tiger Lake C0.
+	* cpuid.c: Added (0,6),(8,14),10 Coffee Lake D0.
+	* cpuid.c: Added (0,6),(8,14),13 Whiskey Lake-U V0 stepping.
+	* cpuid.c: Added (0,6),(8,15) Sapphire Rapids numerous steppings.
+	* cpuid.c: Updated (0,6),(9,12) Jasper Lake with stepping A1.
+
+Thu Mar  2 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Differentiate (0,6),(8,10) Lakefield P-cores from Tremont
+	  E-cores, much as I previously did for Alder Lake & Raptor Lake.
+	* cpuid.c: In decode_uarch_intel, for known Hybrid chips (Alder Lake,
+	  Raptor Lake & Lakefield), only decode the uarch if it's one of the two
+	  known hybrid types.  However, some (0,6),(9,7) Alder Lake's are
+	  non-hybrid (Golden Cove only), so also decode core type == 0x00 there.
+	* cpuid.c: In the Intel Core era, uarch families are identified only by
+	  the initial uarch in the family.  So the family names in {braces},
+	  which also are uarch names, can be confusing.  So, change (synth) and
+	  (uarch synth) for those families to explain the relationships between
+	  the subsequent uarch and the initial uarch, in the form of
+	  "shrink of", "optim of", and the unusual "backport of".
+	* cpuid.c: Added (4th Gen) to the (synth) description of (10,15),(1,*)
+	  AMD EPYC Genoa.
+	* cpuid.c: Updated (synth) for (10,15),(7,*) AMD Phoenix & Phoenix 2
+	  CPUs to claim 4nm process.
+
+Tue Feb 28 2023 Todd Allen <todd.allen@etallen.com>
+	* Made new release.
+
+Sun Feb 26 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Corrected 7/1/eax fast REP instructions, where I'd left the
+	  REP prefix out of the description.
+
+Wed Feb 22 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added 7/1/eax FRED & LKGS bits, from Intel Flexible Return and
+	  Event Deliver (FRED).
+	* cpuid.man: Added Intel Flexible Return and Event Deliver (FRED).
+	* cpuid.c: Clarified 7/1/eax ArchPerfmonExt, which indicates that leaf
+	  0x23 is valid.
+
+Fri Feb 17 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added (uarch synth) decoding for AMD Ryzen (Phoenix E0), based
+	  on sample from bakerlab.org, which I missed on Oct 3 2022, when I
+	  added the (synth) decoding.
+	* cpuid.c: Added 0x80000001/ebx PkgType decoding for AMD (10,15) Family
+	  19h CPUs: (2,1) Vermeer, (5,1) Cezanne/Barcelo, (6,1) Raphael, and
+	  (7,0) Phoenix, based on their respective PPPR's.
+
+Sun Feb 12 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added very early (synth) decoding for Lunar Lake.  There is
+	  no corresponding (uarch synth) decoding, because no name is yet known
+	  for the uarch.
+
+Sat Feb 11 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added (0,6),(9,10) Alder Lake Core names: i*-12000.
+	* cpuid.c: Differentiate (0,6),(9,7) & (0,6),(9,10) Alder Lake Gracemont
+	  E-cores from Golden Cove P-cores.
+	* cpuid.c: Differentiate (0,6),(11,7); (0,6),(11,10) & (0,6),(11,15)
+	  Raptor Lake Gracemont E-cores from Raptor Cove P-cores.
+	* cpuid.c: Added (synth) & (uarch synth) decoding for (10,15),(7,8)
+	  Phoenix 2, from Coreboot*.
+	* cpuid.c: Renamed print_hypervisor_3_eax_xen to
+	  print_hypervisor_3_0_eax_xen.
+	* cpuid.c: Added print_hypervisor_3_0_ebx_xen and decode Xen tsc mode.
+	* cpuid.c: Added (synth) decoding for (10,15),(6,1,1) Raphael B1.
+
+Fri Jan 20 2023 Todd Allen <todd.allen@etallen.com>
+	* Made new release.
+
+Fri Jan 20 2023 Todd Allen <todd.allen@etallen.com>
+	* Eliminate reliance on "old" build system.  Instead, for the cpuid.i386
+	  and cpuid.x86_64, meant to be executable anywhere, including on old
+	  hardware & distros, use static builds.  They're much bigger, but
+	  utterly immune to library changes.
+
+Wed Jan 18 2023 Todd Allen <todd.allen@etallen.com>
+	* Intel's 13th Generation Core datasheet provides stepping names as
+	  well as numbers!  So:
+	* cpuid.c: Added synth decoding for (0,6),(11,7) Raptor Lake B0 stepping.
+	* cpuid.c: Added synth decoding for (0,6),(11,15) Raptor Lake C0
+	  steppings, and clarified case for unknown stepping.
+	* cpuid.man: Added 743844: 13th Generation Core datasheet.
+	* cpuid.c: Fixed (0,6)(12,15) synth typo: Emearld Rapids.
+
+Tue Jan 17 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added 6/eax IA32_HW_FEEDBACK_THREAD_CONFIG bit 25.
+	* cpuid.c: Added 7/0/edx SGX-KEYS: SGX attestation services.
+	* cpuid.c: Clarified 7/0/edx IA32_MCU_OPT_CTRL SRBDS mitigation MSR.
+	* cpuid.c: Clarified 7/0/edx IA32_TSX_FORCE_ABORT MSR.
+	* cpuid.c: Added 7/1/edx CET_SSS: shadow stacks w/o page faults.
+	* cpuid.c: Added several 7/2/edx bits.
+	* cpuid.c: In 0xd/0/eax, corrected CET_U & CET_S, which were IA32_XSS.
+	* cpuid.c: In 0xd/0/eax, removed the IA32_XSS bits, which aren't
+	  relevant for XCR0.
+	* cpuid.c: For 0xd/1/ecx, enumerate the IA32_XSS bits instead of a
+	  hex bitmask.
+	* cpuid.c: For 0xd, added IA32_XSS PASID state (couple places).
+	* cpuid.c: Renamed 0x1a: Native Model ID.
+	* cpuid.c: Added synth & uarch decoding for (0,6),(11,15) Raptor Lake
+	  from MSR_CPUID_table*.
+	* cpuid.c: Added synth decoding for (0,6),(9,7),5 Pentium Gold G7400,
+	  based on instlatx64 sample.
+	* cpuid.c: Added rudimentary synth decoding for future (0,6),(12,15)
+	  Emerald Rapids CPUs.
+	* cpuid.c: Added 7/1/eax LASS: linear address space separation.
+	* cpuid.c: Corrected 0x18/n/edx maximum number of addressible IDs, which
+	  should use minus-one notation.
+
+Tue Jan 17 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Certain leaves cannot be displayed correctly in isolation,
+	  i.e. without information about other leaves saved in the stash.  For
+	  example, the display for leaf 3 uses bits saved from leaf 1.  If the
+	  -l/--leaf option is used to restrict cpuid to reading only a single
+	  leaf, such leaves now are displayed as raw hex, rather than with
+	  incorrect information.  This is handled by passing a NULL stash to
+	  print_reg() and below, and by many new checks for a NULL stash.
+	  Thanks to Bill Zissimopoulos for the bug report.
+
+Mon Jan  9 2023 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Updated cache associativity strings used in 0x80000006 and
+	  0x80000019 leaves to use value ranges, as in AMD docs.
+	* cpuid.c: Fixed mistake in AMD L3 range reservation support: it's in
+	  0x80000020/0 register EBX, not ECX.
+	* cpuid.c: Added 0x80000026/0/edx extended APIC ID.
+
+Tue Dec 13 2022 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added synth & uarch decoding for (10,15),(1,1) Genoa, from
+	  AMD 57095 revision guide.
+	* cpuid.man: Added AMD 57095 revision guides, and some older guides that
+	  I'd forgotten.
+
+Thu Dec  1 2022 Todd Allen <todd.allen@etallen.com>
+	* Made new release.
+
+Wed Nov 30 2022 Todd Allen <todd.allen@etallen.com>
+	* Clarified synth decoding for Intel Xeon D-1700.
+
+Wed Nov 30 2022 Todd Allen <todd.allen@etallen.com>
+	* Added uarch & synth decoding for AMD 4800S Desktop Kit, based on
+	  instlatx64 sample.  The generation is known to be Zen 2 (7nm), but
+	  the core is unknown.  I heard speculation for each of Ariel (rejected
+	  PlayStation 5 CPU), or Lockhart/Scarlett (rejected Xbox CPU).
+	* Added uarch decoding for AMD Genoa A1, based on instlatx64 sample
+	  from @IanCutress.
+
+Mon Nov 28 2022 Todd Allen <todd.allen@etallen.com>
+	* Added uarch decoding for (0,6),(12,15) Emerald Rapids, from LX*.
+
+Mon Nov 28 2022 Todd Allen <todd.allen@etallen.com>
+	* Added synth & uarch decoding for (10,15),(10,1) Bergamo.
+
+Mon Nov 28 2022 Todd Allen <todd.allen@etallen.com>
+	* Added 0x8000000a/edx bits: ROGPT, VNMI, IBS virtualization.
+	* Added 0x8000001b/eax bit: IBS L3 miss filtering support.
+	* Added 0x8000001f/eax bits: RMPQUERY instruction support,
+	  VMPL supervisor shadow stack support, VMGEXIT parameter support,
+	  virtual TOM MSR support, IBS virtual support for SEV-ES guests,
+	  SMT protection support, SVSM communication page MSR support,
+	  VIRT_RMPUPDATE & VIRT_PSMASH MSR support.
+	* Added 0x80000020/0/ecx bit: L3 range reservation support.
+	* Added 0x80000021/eax bits: automatic IBRS,
+	  CPUID disable for non-privileged.
+	* Added 0x80000022/eax bit: AMD LBR & PMC freezing.
+	* Added 0x80000022/ebx field: number of LBR stack entries.
+	* Added 0x80000023 leaf: Multi-Key Encrypted Memory Capabilities.
+	* Added 0x80000026 leaf: AMD Extended CPU Topology.
+
+Fri Nov 11 2022 Mateusz Guzik <mjguzik@gmail.com>
+	* cpuid.c: FreeBSD patch to use lseek64 and cpuset_setaffinity.
+
+Tue Oct 11 2022 Todd Allen <todd.allen@etallen.com>
+	* cpuid.c: Added 0x80000022/eax AMD LBR V2 flag, from LX*.
+	* cpuid.c: Note that (8,15),(10,0) Mendocino now is documented.
+
 Mon Oct  3 2022 Todd Allen <todd.allen@etallen.com>
 	* Made new release.
 

@@ -1,7 +1,7 @@
 .\"
-.\" $Id: cpuid.man,v 20221003 2022/10/03 07:37:43 todd $
+.\" $Id: cpuid.man,v 20230614 2023/06/14 05:34:00 todd $
 .\"
-.TH CPUID 1 "3 Oct 2022" "20221003"
+.TH CPUID 1 "14 Jun 2023" "20230614"
 .SH NAME 
 cpuid \- Dump CPUID information for each CPU
 .SH SYNOPSIS
@@ -478,7 +478,7 @@ Internet of Things Specification Update Addendum
 .br
 335901: Intel Core X-Series Processor Family Specification Update
 .br
-336065: Intel Xeon Processor Scalable Family Specification Update
+336065/613537: Intel Xeon Processor Scalable Family Specification Update
 .br
 336345: Intel Atom Processor C3000 Product Family Specification Update
 .br
@@ -508,6 +508,8 @@ Specification Update
 344425: Architecture Specification: Intel Trust Domain Extensions (Intel TDX)
 Module
 .br
+346466: Intel Flexible Return and Event Delivery (FRED) Specification
+.br
 615213: 10th Generation Intel Core Processor Specification Update
 .br
 631123: 11th Generation Intel Core Processor Family Specification Update
@@ -516,12 +518,30 @@ Module
 Supporting 11th Generation Intel Core Processor Families for S Platform,
 formerly known as Rocket Lake
 .br
+634897: 3rd Generation Intel Xeon Scalable Processors, Codename Cooper Lake
+Specification Update
+.br
 637780: 3rd Gen Intel Xeon Scalable Processors, Codename Ice Lake
 Specification Update
 .br
 682436: 12th Generation Intel Core Processor Specification Update
 Supporting 12th Generation Intel Core Processor for S Processor Line Platforms,
 formerly known as Alder Lake
+.br
+709192: Intel Xeon E-2300 Processor Family Specification Update
+.br
+714071: Intel Xeon D-2700 Processor Family Specification Update
+.br
+743844: 13th Generation Intel Core Processors Datasheet, Volume 1 of 2
+Supporting 13th Generation Intel Core Processor for S/P/PX/H/HX/U Processor Line
+Platforms, formerly known as Raptor Lake
+.br
+759603: Intel Processor and Intel Core i3 N-Series Datasheet, Volume 1 of 2
+.br
+764616: Intel Processor and Intel Core i3 N-series Specification Update
+.br
+772415: 4th Gen Intel Xeon Scalable Processors Codename Sapphire Rapids
+Specification Update
 .br
 Intel Microcode Update Guidance
 .br
@@ -619,6 +639,18 @@ Revision B1 Processors
 55772-A1: Processor Programming Reference (PPR) for AMD Family 17h Model 20h,
 Revision A1 Processors
 .br
+55898: Preliminary Processor Programming Reference (PPR) for AMD Family 19h
+Model 01h, Revision B1 Processors
+.br
+56214: Processor Programming Reference (PPR) for AMD Family 19h Model 21h,
+Revision B0 Processors
+.br
+56569: Processor Programming Reference (PPR) for AMD Family 19h Model 51h,
+Revision A1 Processors
+.br
+55901: Preliminary Processor Programming Reference (PPR) for AMD Family 19h
+Model 11h, Revision B1 Processors
+.br
 55922-A1: Processor Programming Reference (PPR) for AMD Family 17h Model 60h,
 Revision A1 Processors
 .br
@@ -629,6 +661,8 @@ Model 31h, Revision B0 Processors
 Revision B0 Processors
 .br
 56375: AMD64 Technology Platform Quality of Service Extensions
+.br
+57095: Revision Guide for AMD Family 19h Models 10h-1Fh Processors
 .br
 AMD64 Technology Indirect Branch Control Extension (White Paper),
 Revision 4.10.18
